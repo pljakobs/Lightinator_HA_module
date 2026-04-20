@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
+    ATTR_COLOR_TEMP_KELVIN,
     ATTR_EFFECT,
     ATTR_HS_COLOR,
     ATTR_TRANSITION,
@@ -25,7 +25,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_CHIP_ID,
     CONF_DEVICE_NAME,
-    CT_MAX_MIREDS,
+    CT_MAX_KELVIN,
+    CT_MIN_KELVIN,
     CT_MIN_MIREDS,
     CT_MIREDS_RANGE,
     DOMAIN,
@@ -78,8 +79,8 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
     _attr_name = None  # device name used as entity name
     _attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
     _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
-    _attr_min_mireds = CT_MIN_MIREDS
-    _attr_max_mireds = CT_MAX_MIREDS
+    _attr_min_color_temp_kelvin = CT_MIN_KELVIN
+    _attr_max_color_temp_kelvin = CT_MAX_KELVIN
 
     def __init__(
         self, coordinator: LightinatorCoordinator, entry: ConfigEntry
@@ -109,12 +110,13 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
         return (float(hsv.get("h", 0)), float(hsv.get("s", 0)))
 
     @property
-    def color_temp(self) -> int | None:
+    def color_temp_kelvin(self) -> int | None:
         hsv = (self.coordinator.data or {}).get("hsv", {})
         ct = hsv.get("ct", 0)
         if not ct:
             return None
-        return CT_MIN_MIREDS + round(ct * CT_MIREDS_RANGE / 100)
+        mireds = CT_MIN_MIREDS + round(ct * CT_MIREDS_RANGE / 100)
+        return round(1_000_000 / mireds)
 
     @property
     def color_mode(self) -> ColorMode:
@@ -168,8 +170,9 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
             if ATTR_HS_COLOR in kwargs:
                 hsv["h"], hsv["s"] = kwargs[ATTR_HS_COLOR]
                 hsv.pop("ct", None)
-            if ATTR_COLOR_TEMP in kwargs:
-                mireds: int = kwargs[ATTR_COLOR_TEMP]
+            if ATTR_COLOR_TEMP_KELVIN in kwargs:
+                kelvin: int = kwargs[ATTR_COLOR_TEMP_KELVIN]
+                mireds = round(1_000_000 / kelvin)
                 hsv["ct"] = round(
                     (mireds - CT_MIN_MIREDS) * 100 / CT_MIREDS_RANGE
                 )

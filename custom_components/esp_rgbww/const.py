@@ -7,10 +7,14 @@ UPDATE_INTERVAL = 30  # seconds between fallback polls
 
 MDNS_TYPE = "_esprgbwwAPI._http._tcp.local."
 
-# Firmware colour-temperature range (mireds)
-CT_MIN_MIREDS = 153   # ~6500 K — cool white
-CT_MAX_MIREDS = 370   # ~2700 K — warm white
+# Firmware colour-temperature range (mireds — used for conversion only)
+CT_MIN_MIREDS = 153   # ~6536 K — cool white
+CT_MAX_MIREDS = 370   # ~2703 K — warm white
 CT_MIREDS_RANGE = CT_MAX_MIREDS - CT_MIN_MIREDS  # 217
+
+# HA 2024.2+ uses Kelvin natively
+CT_MIN_KELVIN = 2703   # warmest (370 mireds)
+CT_MAX_KELVIN = 6536   # coolest (153 mireds)
 
 # Raw per-channel duty scale (0–1023)
 RAW_MAX = 1023
