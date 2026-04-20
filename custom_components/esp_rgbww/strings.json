@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Lightinator",
+        "description": "Connect to an ESP RGBWW Lightinator device.",
+        "data": {
+          "host": "IP Address or Hostname",
+          "port": "Port",
+          "password": "Password (leave empty if not set)"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Discovered Lightinator",
+        "description": "Found **{name}** at `{host}`. Do you want to add it?",
+        "data": {
+          "password": "Password (leave empty if not set)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the device. Check the IP address and that the device is reachable.",
+      "invalid_auth": "Incorrect password.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "not_lightinator": "The device did not respond as a Lightinator."
+    }
+  }
+}
