@@ -8,5 +8,5 @@
   "integration_type": "hub",
   "iot_class": "local_push",
   "requirements": ["aiohttp>=3.9.0"],
-  "zeroconf": ["_esprgbwwAPI._http._tcp.local."]
+  "zeroconf": ["_esprgbwwAPI._tcp.local."]
 }
