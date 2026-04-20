@@ -5,7 +5,7 @@ DOMAIN = "esp_rgbww"
 DEFAULT_PORT = 80
 UPDATE_INTERVAL = 30  # seconds between fallback polls
 
-MDNS_TYPE = "_esprgbwwAPI._tcp.local."
+MDNS_TYPE = "_http._tcp.local."
 
 # Firmware colour-temperature range (mireds — used for conversion only)
 CT_MIN_MIREDS = 153   # ~6536 K — cool white

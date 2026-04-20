@@ -27,7 +27,7 @@ Copy the `custom_components/esp_rgbww/` folder into your HA `config/custom_compo
 
 ## Configuration
 
-Devices are discovered automatically via mDNS (`_esprgbwwAPI._http._tcp.local.`).  
+Devices are discovered automatically via mDNS (`_http._tcp.local.` with `fn=LED Controller API`).  
 You can also add a device manually via **Settings → Devices & Services → Add Integration → Lightinator**.
 
 ## Entities
