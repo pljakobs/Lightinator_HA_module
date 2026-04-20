@@ -1,0 +1,79 @@
+fade_sequence:
+  name: Fade Sequence
+  description: >
+    Queue a multi-step colour sequence on a Lightinator device. Each step fades
+    or jumps to a colour over the specified duration. Steps are processed in order
+    using the device's animation queue.
+  target:
+    device:
+      integration: esp_rgbww
+  fields:
+    steps:
+      name: Steps
+      description: >
+        List of colour steps. Each step is an object with at minimum one colour
+        key and a duration. Supported keys per step:
+          hsv   – HSV colour object with optional h (0-360), s (0-100), v (0-100), ct (100-500 or 2000-10000).
+          raw   – Raw PWM values object with optional r, g, b, ww, cw (0-1023).
+          t     – Duration in milliseconds (integer). Omit for an instant jump.
+          cmd   – "fade" (default) or "solid" (instant set).
+          name  – Optional label for the step (string).
+        The integration automatically sets queue policy: first step clears the
+        animation queue (front_reset), subsequent steps are appended (back).
+      required: true
+      example:
+        - hsv:
+            h: 0
+            s: 100
+            v: 100
+          t: 2000
+          cmd: fade
+        - hsv:
+            h: 120
+            s: 100
+            v: 100
+          t: 2000
+          cmd: fade
+        - hsv:
+            h: 240
+            s: 100
+            v: 100
+          t: 2000
+          cmd: fade
+      selector:
+        object:
+    loop:
+      name: Loop last step
+      description: >
+        When enabled, the last step in the sequence will repeat continuously
+        (requeue itself) until the animation is stopped.
+      default: false
+      selector:
+        boolean:
+
+blink:
+  name: Blink
+  description: >
+    Trigger a blink (on/off) animation on a Lightinator device. The device
+    alternates between its current colour and off at the specified speed.
+  target:
+    device:
+      integration: esp_rgbww
+  fields:
+    speed_ms:
+      name: Speed
+      description: Half-period of each blink cycle in milliseconds (time on or off).
+      default: 500
+      selector:
+        number:
+          min: 50
+          max: 10000
+          step: 50
+          unit_of_measurement: ms
+          mode: box
+    loop:
+      name: Loop
+      description: Keep blinking until the animation is explicitly stopped.
+      default: false
+      selector:
+        boolean:
