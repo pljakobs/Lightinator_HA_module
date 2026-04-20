@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, UnitOfInformation, UnitOfTime
+from homeassistant.const import CONF_HOST, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, UnitOfInformation, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
@@ -59,6 +59,15 @@ SENSORS: tuple[LightinatorSensorDescription, ...] = (
         name="WiFi Connected",
         device_class=None,
         state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    LightinatorSensorDescription(
+        key="rssi",
+        info_path=("connection", "rssi"),
+        name="Signal Strength",
+        device_class=SensorDeviceClass.SIGNAL_STRENGTH,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     LightinatorSensorDescription(
