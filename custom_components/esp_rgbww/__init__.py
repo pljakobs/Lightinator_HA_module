@@ -70,8 +70,48 @@ def _register_services(hass: HomeAssistant) -> None:
         for coordinator in _get_coordinators_for_call(hass, call):
             await coordinator.post("/blink", payload)
 
+    async def handle_discover_cluster(call: ServiceCall) -> None:
+        """Discover and add controllers listed by /hosts on target device(s)."""
+        added = 0
+        seen_hosts: set[str] = set()
+
+        for coordinator in _get_coordinators_for_call(hass, call):
+            try:
+                hosts = await coordinator.get_cluster_hosts()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Lightinator discovery failed for %s: %s",
+                    coordinator.config_entry.data.get("host", "unknown"),
+                    err,
+                )
+                continue
+
+            for host in hosts:
+                if host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+
+                result = await hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": "user"},
+                    data={
+                        "host": host,
+                        "port": coordinator.config_entry.data.get("port", 80),
+                        "password": coordinator.config_entry.data.get("password", ""),
+                    },
+                )
+                if result.get("type") == "create_entry":
+                    added += 1
+
+        _LOGGER.info(
+            "Lightinator discover_cluster checked %d host(s), added %d new device(s)",
+            len(seen_hosts),
+            added,
+        )
+
     hass.services.async_register(DOMAIN, "fade_sequence", handle_fade_sequence)
     hass.services.async_register(DOMAIN, "blink", handle_blink)
+    hass.services.async_register(DOMAIN, "discover_cluster", handle_discover_cluster)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

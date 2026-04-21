@@ -8,11 +8,12 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN
+from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, CONF_GROUP_AREA_MAP, DOMAIN
 from .coordinator import LightinatorCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,7 +26,23 @@ async def async_setup_entry(
 ) -> None:
     """Set up Lightinator preset select entity."""
     coordinator: LightinatorCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([LightinatorPresetSelect(coordinator, entry)])
+    entities: list[SelectEntity] = [LightinatorPresetSelect(coordinator, entry)]
+
+    groups = (coordinator.data or {}).get("groups", [])
+    seen_group_ids: set[str] = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("id", "")).strip()
+        if not group_id or group_id in seen_group_ids:
+            continue
+        seen_group_ids.add(group_id)
+        group_name = str(group.get("name") or f"Group {group_id}")
+        entities.append(
+            LightinatorGroupAreaSelect(coordinator, entry, group_id, group_name)
+        )
+
+    async_add_entities(entities)
 
 
 class LightinatorPresetSelect(CoordinatorEntity[LightinatorCoordinator], SelectEntity):
@@ -78,3 +95,67 @@ class LightinatorPresetSelect(CoordinatorEntity[LightinatorCoordinator], SelectE
             return
 
         await self.coordinator.post("/color", {"cmd": "solid", "hsv": hsv})
+
+
+class LightinatorGroupAreaSelect(CoordinatorEntity[LightinatorCoordinator], SelectEntity):
+    """Maps a controller group to an HA Area (room)."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: LightinatorCoordinator,
+        entry: ConfigEntry,
+        group_id: str,
+        group_name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._group_id = group_id
+        self._attr_name = f"Group {group_name} Room"
+        self._attr_unique_id = f"{entry.data[CONF_CHIP_ID]}_group_{group_id}_room"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.data[CONF_CHIP_ID])},
+            name=entry.data[CONF_DEVICE_NAME],
+            manufacturer="ESP RGBWW Firmware",
+            model="RGBWW Controller",
+            configuration_url=f"http://{entry.data[CONF_HOST]}",
+        )
+
+    @property
+    def options(self) -> list[str]:
+        area_reg = ar.async_get(self.hass)
+        area_names = sorted(area.name for area in area_reg.async_list_areas())
+        return ["Unassigned", *area_names]
+
+    @property
+    def current_option(self) -> str | None:
+        mappings = self._entry.options.get(CONF_GROUP_AREA_MAP, {})
+        area_id = mappings.get(self._group_id)
+        if not area_id:
+            return "Unassigned"
+
+        area_reg = ar.async_get(self.hass)
+        area = area_reg.async_get_area(area_id)
+        return area.name if area else "Unassigned"
+
+    async def async_select_option(self, option: str) -> None:
+        area_reg = ar.async_get(self.hass)
+        mappings = dict(self._entry.options.get(CONF_GROUP_AREA_MAP, {}))
+
+        if option == "Unassigned":
+            mappings.pop(self._group_id, None)
+        else:
+            selected_area = next(
+                (area for area in area_reg.async_list_areas() if area.name == option),
+                None,
+            )
+            if selected_area is None:
+                _LOGGER.warning("Area '%s' not found for group mapping", option)
+                return
+            mappings[self._group_id] = selected_area.id
+
+        new_options = dict(self._entry.options)
+        new_options[CONF_GROUP_AREA_MAP] = mappings
+        self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        self.async_write_ha_state()

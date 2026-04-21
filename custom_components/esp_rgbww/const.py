@@ -5,7 +5,7 @@ DOMAIN = "esp_rgbww"
 DEFAULT_PORT = 80
 UPDATE_INTERVAL = 30  # seconds between fallback polls
 
-MDNS_TYPE = "_http._tcp.local."
+MDNS_TYPE = "_lightinator-api._tcp.local."
 
 # Firmware colour-temperature range (mireds — used for conversion only)
 CT_MIN_MIREDS = 153   # ~6536 K — cool white
@@ -25,3 +25,4 @@ PLATFORMS = ["light", "button", "sensor", "select"]
 # Config entry keys (beyond the HA standard CONF_HOST / CONF_PORT / CONF_PASSWORD)
 CONF_CHIP_ID = "chip_id"
 CONF_DEVICE_NAME = "device_name"
+CONF_GROUP_AREA_MAP = "group_area_map"

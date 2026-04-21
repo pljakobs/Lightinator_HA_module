@@ -148,7 +148,7 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle a device discovered via mDNS."""
         self._host = discovery_info.host
         self._port = discovery_info.port or DEFAULT_PORT
-        # TXT record fn= is the friendly name; fall back to service name
+        # _lightinator-api._tcp TXT carries id= (chip id) and v=2 (API version)
         self._name = (
             discovery_info.properties.get("fn")
             or discovery_info.name.split(".")[0]

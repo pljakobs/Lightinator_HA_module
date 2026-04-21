@@ -1,4 +1,10 @@
 {
+  "services": {
+    "discover_cluster": {
+      "name": "Discover Cluster Controllers",
+      "description": "Query a known controller's /hosts endpoint and add missing peers."
+    }
+  },
   "config": {
     "step": {
       "user": {

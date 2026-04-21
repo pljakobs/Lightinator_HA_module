@@ -8,5 +8,5 @@
   "integration_type": "hub",
   "iot_class": "local_push",
   "requirements": ["aiohttp>=3.9.0"],
-  "zeroconf": [{"type": "_http._tcp.local.", "properties": {"fn": "LED Controller API"}}]
+  "zeroconf": [{"type": "_lightinator-api._tcp.local."}]
 }

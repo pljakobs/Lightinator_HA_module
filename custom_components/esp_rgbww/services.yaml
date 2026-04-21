@@ -77,3 +77,12 @@ blink:
       default: false
       selector:
         boolean:
+
+discover_cluster:
+  name: Discover Cluster Controllers
+  description: >
+    Query the selected Lightinator device's /hosts endpoint and automatically
+    attempt to add all discovered peer controllers to Home Assistant.
+  target:
+    device:
+      integration: esp_rgbww

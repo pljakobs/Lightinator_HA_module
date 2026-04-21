@@ -83,6 +83,44 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ) as resp:
             resp.raise_for_status()
 
+    async def get_json(self, path: str) -> Any:
+        """GET and parse JSON from a device endpoint."""
+        return await self._get(path)
+
+    async def get_cluster_hosts(self) -> list[str]:
+        """Read /hosts and return a deduplicated host list."""
+        raw_hosts = await self._get("/hosts")
+        candidates: list[str] = []
+
+        if isinstance(raw_hosts, list):
+            for item in raw_hosts:
+                if isinstance(item, str):
+                    candidates.append(item)
+                elif isinstance(item, dict):
+                    host = item.get("hostname") or item.get("host") or item.get("ip")
+                    if isinstance(host, str):
+                        candidates.append(host)
+        elif isinstance(raw_hosts, dict):
+            for key in ("hosts", "items", "data"):
+                nested = raw_hosts.get(key)
+                if isinstance(nested, list):
+                    for item in nested:
+                        if isinstance(item, str):
+                            candidates.append(item)
+                        elif isinstance(item, dict):
+                            host = item.get("hostname") or item.get("host") or item.get("ip")
+                            if isinstance(host, str):
+                                candidates.append(host)
+
+        seen: set[str] = set()
+        out: list[str] = []
+        for host in candidates:
+            cleaned = host.strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                out.append(cleaned)
+        return out
+
     @property
     def ws_connected(self) -> bool:
         """Return True while the WebSocket link is up."""
@@ -110,12 +148,18 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if isinstance(data_resp, dict)
             else []
         )
+        groups = (
+            data_resp.get("groups", [])
+            if isinstance(data_resp, dict)
+            else []
+        )
         current = self.data or {}
         return {
             "hsv": color_resp.get("hsv", current.get("hsv", {})),
             "raw": color_resp.get("raw", current.get("raw", {})),
             "info": info_resp,
             "presets": presets,
+            "groups": groups,
         }
 
     # ------------------------------------------------------------------
