@@ -94,6 +94,7 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
             host = user_input[CONF_HOST]
             port = user_input.get(CONF_PORT, DEFAULT_PORT)
             password = user_input.get(CONF_PASSWORD, "")
+            fallback_name = str(user_input.get(CONF_DEVICE_NAME, "")).strip()
             session = async_get_clientsession(self.hass)
 
             try:
@@ -114,6 +115,8 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
 
                 device_name = await _fetch_device_name(session, host, port, password)
+                if device_name == host and fallback_name:
+                    device_name = fallback_name
 
                 return self.async_create_entry(
                     title=device_name,

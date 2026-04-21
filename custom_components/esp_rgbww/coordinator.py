@@ -87,39 +87,69 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """GET and parse JSON from a device endpoint."""
         return await self._get(path)
 
-    async def get_cluster_hosts(self) -> list[str]:
-        """Read /hosts and return a deduplicated host list."""
+    async def get_cluster_peers(self) -> list[dict[str, str]]:
+        """Read /hosts and return deduplicated peers with host and display name."""
         raw_hosts = await self._get("/hosts")
-        candidates: list[str] = []
+        candidates: list[dict[str, str]] = []
+
+        def _append_peer(item: Any) -> None:
+            if isinstance(item, str):
+                cleaned = item.strip()
+                if cleaned:
+                    candidates.append({"host": cleaned, "name": cleaned})
+                return
+
+            if not isinstance(item, dict):
+                return
+
+            connect_host = (
+                item.get("host")
+                or item.get("ip")
+                or item.get("address")
+                or item.get("hostname")
+            )
+            display_name = (
+                item.get("hostname")
+                or item.get("name")
+                or item.get("host")
+                or item.get("ip")
+                or connect_host
+            )
+
+            if isinstance(connect_host, str) and connect_host.strip():
+                host_clean = connect_host.strip()
+                name_clean = (
+                    display_name.strip()
+                    if isinstance(display_name, str) and display_name.strip()
+                    else host_clean
+                )
+                candidates.append({"host": host_clean, "name": name_clean})
 
         if isinstance(raw_hosts, list):
             for item in raw_hosts:
-                if isinstance(item, str):
-                    candidates.append(item)
-                elif isinstance(item, dict):
-                    host = item.get("hostname") or item.get("host") or item.get("ip")
-                    if isinstance(host, str):
-                        candidates.append(host)
+                _append_peer(item)
         elif isinstance(raw_hosts, dict):
             for key in ("hosts", "items", "data"):
                 nested = raw_hosts.get(key)
                 if isinstance(nested, list):
                     for item in nested:
-                        if isinstance(item, str):
-                            candidates.append(item)
-                        elif isinstance(item, dict):
-                            host = item.get("hostname") or item.get("host") or item.get("ip")
-                            if isinstance(host, str):
-                                candidates.append(host)
+                        _append_peer(item)
 
-        seen: set[str] = set()
-        out: list[str] = []
-        for host in candidates:
-            cleaned = host.strip()
-            if cleaned and cleaned not in seen:
-                seen.add(cleaned)
-                out.append(cleaned)
-        return out
+        seen_hosts: set[str] = set()
+        peers: list[dict[str, str]] = []
+        for peer in candidates:
+            host = peer["host"]
+            if host in seen_hosts:
+                continue
+            seen_hosts.add(host)
+            peers.append(peer)
+
+        return peers
+
+    async def get_cluster_hosts(self) -> list[str]:
+        """Read /hosts and return a deduplicated host list."""
+        peers = await self.get_cluster_peers()
+        return [peer["host"] for peer in peers]
 
     @property
     def ws_connected(self) -> bool:

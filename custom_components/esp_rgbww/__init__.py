@@ -77,7 +77,7 @@ def _register_services(hass: HomeAssistant) -> None:
 
         for coordinator in _get_coordinators_for_call(hass, call):
             try:
-                hosts = await coordinator.get_cluster_hosts()
+                peers = await coordinator.get_cluster_peers()
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning(
                     "Lightinator discovery failed for %s: %s",
@@ -86,7 +86,8 @@ def _register_services(hass: HomeAssistant) -> None:
                 )
                 continue
 
-            for host in hosts:
+            for peer in peers:
+                host = peer["host"]
                 if host in seen_hosts:
                     continue
                 seen_hosts.add(host)
@@ -98,6 +99,7 @@ def _register_services(hass: HomeAssistant) -> None:
                         "host": host,
                         "port": coordinator.config_entry.data.get("port", 80),
                         "password": coordinator.config_entry.data.get("password", ""),
+                        "device_name": peer.get("name", host),
                     },
                 )
                 if result.get("type") == "create_entry":
