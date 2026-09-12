@@ -166,7 +166,8 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
                 _LOGGER.warning("Preset '%s' not found", preset_name)
         else:
             if ATTR_BRIGHTNESS in kwargs:
-                hsv["v"] = round(kwargs[ATTR_BRIGHTNESS] * 100 / 255)
+                requested = kwargs[ATTR_BRIGHTNESS]
+                hsv["v"] = max(1, round(requested * 100 / 255)) if requested > 0 else 0
             if ATTR_HS_COLOR in kwargs:
                 hsv["h"], hsv["s"] = kwargs[ATTR_HS_COLOR]
                 hsv.pop("ct", None)
@@ -186,7 +187,7 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
-        await self.coordinator.post("/off")
+        await self.coordinator.post("/off", {})
 
 
 class LightinatorChannelLight(CoordinatorEntity[LightinatorCoordinator], LightEntity):
