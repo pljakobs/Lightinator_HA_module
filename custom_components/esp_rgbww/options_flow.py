@@ -9,9 +9,9 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
-from homeassistant.const import CONF_DEVICE_NAME, CONF_HOST, CONF_PASSWORD
+from homeassistant.const import CONF_HOST, CONF_PASSWORD
 
-from .const import DOMAIN
+from .const import CONF_DEVICE_NAME, DOMAIN
 from .coordinator import LightinatorCoordinator
 
 _LOGGER = logging.getLogger(__name__)
