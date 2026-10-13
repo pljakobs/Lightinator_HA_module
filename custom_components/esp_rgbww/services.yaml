@@ -86,3 +86,31 @@ discover_cluster:
   target:
     device:
       integration: esp_rgbww
+
+save_preset:
+  name: Save current color as preset
+  description: Save or update a controller-local preset from its current color.
+  target:
+    device:
+      integration: esp_rgbww
+  fields:
+    name:
+      name: Preset name
+      description: An existing preset with this name will be updated.
+      required: true
+      selector:
+        text:
+    color_mode:
+      name: Color representation
+      description: Save the current HSV or raw-channel color representation.
+      default: hsv
+      selector:
+        select:
+          options:
+            - hsv
+            - raw
+    favorite:
+      name: Favorite
+      description: Mark the preset as a favorite (leave empty to preserve its current value).
+      selector:
+        boolean:

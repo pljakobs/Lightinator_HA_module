@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -56,6 +58,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._send_lock = asyncio.Lock()
         self._auth_lock = asyncio.Lock()
         self._authenticated = False
+        self._data_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -99,6 +102,100 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def get_json(self, path: str) -> Any:
         """GET and parse JSON from a device endpoint."""
         return await self._get(path)
+
+    async def save_current_preset(
+        self, name: str, color_mode: str, favorite: bool | None = None
+    ) -> None:
+        """Create or update a preset from this controller's current color."""
+        if color_mode not in {"hsv", "raw"}:
+            raise ValueError("color_mode must be 'hsv' or 'raw'")
+
+        current_color = (self.data or {}).get(color_mode)
+        if not isinstance(current_color, dict) or not current_color:
+            raise ValueError(f"Current {color_mode} color is not available")
+
+        color_fields = (
+            ("h", "s", "v", "ct")
+            if color_mode == "hsv"
+            else ("r", "g", "b", "ww", "cw")
+        )
+        color_values = {
+            key: current_color[key]
+            for key in color_fields
+            if key in current_color and current_color[key] is not None
+        }
+        if not color_values:
+            raise ValueError(f"Current {color_mode} color is empty")
+
+        async with self._data_lock:
+            data_doc = await self._get("/data")
+            if not isinstance(data_doc, dict):
+                raise ValueError("Controller returned invalid /data")
+
+            presets = data_doc.get("presets", [])
+            if not isinstance(presets, list):
+                raise ValueError("Controller /data presets field is not a list")
+
+            now_ms = int(time.time() * 1000)
+            preset_index = next(
+                (
+                    index
+                    for index, preset in enumerate(presets)
+                    if isinstance(preset, dict) and preset.get("name") == name
+                ),
+                None,
+            )
+
+            if preset_index is None:
+                chip_id = str(self._entry.data.get("chip_id", self._host))
+                preset: dict[str, Any] = {
+                    "id": f"{chip_id}-{secrets.randbelow(90_000_000) + 10_000_000}",
+                    "name": name,
+                    "favorite": favorite if favorite is not None else False,
+                    "ts": now_ms,
+                    "icon": "palette",
+                    "color": {},
+                }
+                payload = {"presets[]": [preset]}
+            else:
+                preset = dict(presets[preset_index])
+                color_options = preset.get("color")
+                if isinstance(color_options, dict):
+                    color_options = dict(color_options)
+                else:
+                    color_options = {
+                        key: preset[key]
+                        for key in ("cmd", "t", "s", "q", "d", "channels")
+                        if key in preset
+                    }
+
+                color_options.pop("id", None)
+                color_options.pop("hsv", None)
+                color_options.pop("raw", None)
+                color_options[color_mode] = color_values
+                preset["color"] = color_options
+                preset["name"] = name
+                preset["ts"] = now_ms
+                if favorite is not None:
+                    preset["favorite"] = favorite
+                preset_id = preset.get("id")
+                selector = (
+                    f"presets[id={preset_id}]"
+                    if isinstance(preset_id, str) and preset_id
+                    else f"presets[{preset_index}]"
+                )
+                payload = {selector: preset}
+
+            url = self._base_url() + "/data"
+            async with self._session.post(
+                url,
+                json=payload,
+                auth=self._auth(),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                resp.raise_for_status()
+
+        await self.async_request_refresh()
 
     async def get_cluster_peers(self) -> list[dict[str, str]]:
         """Read /hosts and return deduplicated peers with host and display name."""
@@ -183,7 +280,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             color_resp = await self._rpc_request("color", {})
             info_resp = await self._rpc_request("info", {"sparse": "false"})
-            data_resp = await self._get("/data")
+            async with self._data_lock:
+                data_resp = await self._get("/data")
         except (aiohttp.ClientError, RpcError, asyncio.TimeoutError, ConnectionError) as err:
             raise UpdateFailed(f"Error communicating with Lightinator: {err}") from err
 

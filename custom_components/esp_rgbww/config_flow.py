@@ -18,6 +18,30 @@ from .rpc import RpcAuthenticationError, websocket_request
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _fetch_device_name(
+    session: aiohttp.ClientSession,
+    host: str,
+    port: int,
+    password: str,
+) -> str:
+    """Read the configured hostname from GET /config."""
+    auth = aiohttp.BasicAuth("", password) if password else None
+    url = f"http://{host}:{port}/config"
+    try:
+        async with session.get(
+            url, auth=auth, timeout=aiohttp.ClientTimeout(total=6)
+        ) as resp:
+            resp.raise_for_status()
+            config = await resp.json()
+    except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+        _LOGGER.debug("Unable to read Lightinator hostname from /config: %s", err)
+        return ""
+
+    general = config.get("general", {}) if isinstance(config, dict) else {}
+    device_name = general.get("device_name", "") if isinstance(general, dict) else ""
+    return device_name.strip() if isinstance(device_name, str) else ""
+
+
 class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Lightinator."""
 
@@ -66,7 +90,10 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(chip_id)
                 self._abort_if_unique_id_configured()
 
-                device_name = fallback_name or self._name or host
+                configured_name = await _fetch_device_name(
+                    session, host, port, password
+                )
+                device_name = configured_name or fallback_name or self._name or host
 
                 return self.async_create_entry(
                     title=device_name,
@@ -156,7 +183,10 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                     await self.async_set_unique_id(chip_id)
                     self._abort_if_unique_id_configured()
 
-                device_name = self._name or self._host
+                configured_name = await _fetch_device_name(
+                    session, self._host, self._port, password
+                )
+                device_name = configured_name or self._name or self._host
 
                 return self.async_create_entry(
                     title=device_name or self._name,

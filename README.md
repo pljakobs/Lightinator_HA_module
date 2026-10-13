@@ -9,6 +9,7 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 - **Full light entity**: HS colour + colour-temperature (2703 K – 6536 K), brightness, transitions
 - **Per-channel lights** for the dedicated warm-white and cool-white channels
 - **Preset select** — apply saved colour presets from the device
+- **Save preset service** — save the current HSV or raw color under a preset name
 - **Animation controls** — Stop, Skip, Pause, Resume buttons
 - **Diagnostic sensors** — uptime, free heap, WiFi IP
 

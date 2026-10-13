@@ -70,6 +70,17 @@ def _register_services(hass: HomeAssistant) -> None:
         for coordinator in _get_coordinators_for_call(hass, call):
             await coordinator.post("/blink", payload)
 
+    async def handle_save_preset(call: ServiceCall) -> None:
+        """Save the current controller color under a preset name."""
+        name = str(call.data.get("name", "")).strip()
+        if not name:
+            raise ValueError("Preset name cannot be empty")
+        color_mode = str(call.data.get("color_mode", "hsv"))
+        favorite = call.data.get("favorite")
+
+        for coordinator in _get_coordinators_for_call(hass, call):
+            await coordinator.save_current_preset(name, color_mode, favorite)
+
     async def handle_discover_cluster(call: ServiceCall) -> None:
         """Discover and add controllers listed by /hosts on target device(s)."""
         added = 0
@@ -114,6 +125,7 @@ def _register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "fade_sequence", handle_fade_sequence)
     hass.services.async_register(DOMAIN, "blink", handle_blink)
     hass.services.async_register(DOMAIN, "discover_cluster", handle_discover_cluster)
+    hass.services.async_register(DOMAIN, "save_preset", handle_save_preset)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
