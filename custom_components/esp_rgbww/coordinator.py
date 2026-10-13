@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, UPDATE_INTERVAL
-from .rpc import RpcError, authenticate_websocket
+from .rpc import RpcAuthenticationError, RpcError, authentication_hash
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,8 +52,10 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._closing: bool = False
         self._ws_ready = asyncio.Event()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
-        self._next_request_id = 3
+        self._next_request_id = 1
         self._send_lock = asyncio.Lock()
+        self._auth_lock = asyncio.Lock()
+        self._authenticated = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -209,10 +211,16 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def _rpc_request(
-        self, method: str, params: dict[str, Any]
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        wait_ready: bool = True,
+        retry_auth: bool = True,
     ) -> dict[str, Any]:
         """Send a JSON-RPC request over the active WebSocket."""
-        await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
+        if wait_ready:
+            await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
         ws = self._ws
         if ws is None or ws.closed:
             raise ConnectionError("Lightinator WebSocket is not connected")
@@ -237,7 +245,39 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         error = response.get("error")
         if isinstance(error, dict):
-            raise RpcError(error.get("code"), str(error.get("message", method)))
+            code = error.get("code")
+            challenge = error.get("challenge")
+            error_type = RpcAuthenticationError if code == -32001 else RpcError
+            rpc_error = error_type(
+                code,
+                str(error.get("message", method)),
+                challenge if isinstance(challenge, str) else None,
+            )
+            if not retry_auth or not isinstance(rpc_error, RpcAuthenticationError):
+                raise rpc_error
+            if not rpc_error.challenge:
+                raise rpc_error
+
+            async with self._auth_lock:
+                if not self._authenticated:
+                    auth_result = await self._rpc_request(
+                        "authenticate",
+                        {
+                            "hash": authentication_hash(
+                                rpc_error.challenge, self._password
+                            )
+                        },
+                        wait_ready=wait_ready,
+                        retry_auth=False,
+                    )
+                    if auth_result.get("authenticated") is not True:
+                        raise RpcAuthenticationError(
+                            None, "Invalid authentication response"
+                        )
+                    self._authenticated = True
+            return await self._rpc_request(
+                method, params, wait_ready=wait_ready, retry_auth=False
+            )
         result = response.get("result")
         if not isinstance(result, dict):
             raise RpcError(None, f"Invalid response for JSON-RPC method '{method}'")
@@ -254,14 +294,16 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ws_url, heartbeat=30
                 ) as ws:
                     self._ws = ws
-                    await authenticate_websocket(ws, self._password)
-                    self._next_request_id = 3
+                    self._authenticated = False
+                    self._next_request_id = 1
                     reader = asyncio.create_task(self._listen_ws(ws))
-                    self._ws_connected = True
-                    self._ws_ready.set()
                     backoff = _WS_BACKOFF_INITIAL
                     _LOGGER.debug("Lightinator WS connected to %s", ws_url)
-                    await self._rpc_request("runtime_info_subscribe", {})
+                    await self._rpc_request(
+                        "runtime_info_subscribe", {}, wait_ready=False
+                    )
+                    self._ws_connected = True
+                    self._ws_ready.set()
                     await reader
 
             except asyncio.CancelledError:
@@ -274,6 +316,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._ws_ready.clear()
                 self._ws_connected = False
                 self._ws = None
+                self._authenticated = False
                 self._fail_pending(ConnectionError("Lightinator WebSocket disconnected"))
                 if reader and not reader.done():
                     reader.cancel()

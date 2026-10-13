@@ -26,6 +26,30 @@ class RpcAuthenticationError(RpcError):
     """Authentication failed or the device requires missing credentials."""
 
 
+def authentication_hash(challenge: str, password: str) -> str:
+    """Return the firmware's SHA-256 challenge response."""
+    return hashlib.sha256(f"{challenge}:{password}".encode()).hexdigest()
+
+
+def _response_result(response: dict[str, Any]) -> dict[str, Any]:
+    error = response.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = str(error.get("message", "JSON-RPC request failed"))
+        challenge = error.get("challenge")
+        error_type = RpcAuthenticationError if code == -32001 else RpcError
+        raise error_type(
+            code,
+            message,
+            challenge if isinstance(challenge, str) else None,
+        )
+
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RpcError(None, "Invalid JSON-RPC response")
+    return result
+
+
 async def receive_rpc_response(
     ws: aiohttp.ClientWebSocketResponse, request_id: int
 ) -> dict[str, Any]:
@@ -66,31 +90,19 @@ async def exchange_rpc(
 
 
 async def authenticate_websocket(
-    ws: aiohttp.ClientWebSocketResponse, password: str
+    ws: aiohttp.ClientWebSocketResponse,
+    password: str,
+    challenge: str,
+    request_id: int,
 ) -> None:
-    """Complete the firmware's one-shot SHA-256 challenge handshake."""
-    response = await exchange_rpc(ws, 1, "authenticate", {})
-    error = response.get("error")
-    if not isinstance(error, dict):
-        return
-
-    challenge = error.get("challenge")
-    if error.get("code") != -32001 or not isinstance(challenge, str):
-        raise RpcAuthenticationError(
-            error.get("code"), str(error.get("message", "Authentication failed"))
-        )
-
-    digest = hashlib.sha256(f"{challenge}:{password}".encode()).hexdigest()
-    response = await exchange_rpc(ws, 2, "authenticate", {"hash": digest})
-    error = response.get("error")
-    if isinstance(error, dict):
-        raise RpcAuthenticationError(
-            error.get("code"),
-            str(error.get("message", "Authentication failed")),
-            error.get("challenge") if isinstance(error.get("challenge"), str) else None,
-        )
-
-    result = response.get("result")
+    """Answer a challenge returned by the requested RPC method."""
+    response = await exchange_rpc(
+        ws,
+        request_id,
+        "authenticate",
+        {"hash": authentication_hash(challenge, password)},
+    )
+    result = _response_result(response)
     if not isinstance(result, dict) or result.get("authenticated") is not True:
         raise RpcAuthenticationError(None, "Invalid authentication response")
 
@@ -103,19 +115,15 @@ async def websocket_request(
     method: str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Open an authenticated WebSocket and make one JSON-RPC request."""
+    """Open a plain WebSocket and authenticate only if the RPC requires it."""
     url = f"ws://{host}:{port}/ws"
     async with session.ws_connect(url, heartbeat=30) as ws:
-        await authenticate_websocket(ws, password)
-        response = await exchange_rpc(ws, 3, method, params or {})
-
-    error = response.get("error")
-    if isinstance(error, dict):
-        raise RpcError(
-            error.get("code"), str(error.get("message", "JSON-RPC request failed"))
-        )
-
-    result = response.get("result")
-    if not isinstance(result, dict):
-        raise RpcError(None, "Invalid JSON-RPC response")
-    return result
+        response = await exchange_rpc(ws, 1, method, params or {})
+        try:
+            return _response_result(response)
+        except RpcAuthenticationError as err:
+            if not err.challenge:
+                raise
+            await authenticate_websocket(ws, password, err.challenge, 2)
+            response = await exchange_rpc(ws, 3, method, params or {})
+            return _response_result(response)
