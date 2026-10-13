@@ -25,10 +25,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_CHIP_ID,
     CONF_DEVICE_NAME,
-    CT_MAX_KELVIN,
-    CT_MIN_KELVIN,
     DOMAIN,
     RAW_MAX,
+    RAW_CHANNELS_BY_MODEL,
+    configured_color_temperature_range,
 )
 from .coordinator import LightinatorCoordinator
 from .presets import preset_command, preset_names
@@ -56,12 +56,28 @@ async def async_setup_entry(
 
     entities: list[LightEntity] = [LightinatorMainLight(coordinator, entry)]
 
-    # Per-channel raw lights for warm-white and cool-white channels
     raw = (coordinator.data or {}).get("raw", {})
-    if "ww" in raw:
-        entities.append(LightinatorChannelLight(coordinator, entry, "ww", "Warm White"))
-    if "cw" in raw:
-        entities.append(LightinatorChannelLight(coordinator, entry, "cw", "Cool White"))
+    config = (coordinator.data or {}).get("config", {})
+    color_config = config.get("color", {}) if isinstance(config, dict) else {}
+    model = color_config.get("color_mode") if isinstance(color_config, dict) else None
+    channels = RAW_CHANNELS_BY_MODEL.get(model)
+    if channels is None:
+        channels = tuple(
+            (channel, label)
+            for channel, label in (
+                ("r", "Red"),
+                ("g", "Green"),
+                ("b", "Blue"),
+                ("ww", "Warm White"),
+                ("cw", "Cool White"),
+            )
+            if channel in raw
+        )
+    entities.extend(
+        LightinatorChannelLight(coordinator, entry, channel, label)
+        for channel, label in channels
+        if channel in raw
+    )
 
     async_add_entities(entities)
 
@@ -76,9 +92,6 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
     _attr_name = None  # device name used as entity name
     _attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
     _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
-    _attr_min_color_temp_kelvin = CT_MIN_KELVIN
-    _attr_max_color_temp_kelvin = CT_MAX_KELVIN
-
     def __init__(
         self, coordinator: LightinatorCoordinator, entry: ConfigEntry
     ) -> None:
@@ -86,6 +99,16 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
         self._entry = entry
         self._attr_unique_id = entry.data[CONF_CHIP_ID]
         self._attr_device_info = _device_info(entry)
+
+    @property
+    def min_color_temp_kelvin(self) -> int:
+        config = (self.coordinator.data or {}).get("config", {})
+        return configured_color_temperature_range(config)[0]
+
+    @property
+    def max_color_temp_kelvin(self) -> int:
+        config = (self.coordinator.data or {}).get("config", {})
+        return configured_color_temperature_range(config)[1]
 
     # ------------------------------------------------------------------
     # State properties
@@ -194,7 +217,7 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
 
 
 class LightinatorChannelLight(CoordinatorEntity[LightinatorCoordinator], LightEntity):
-    """A single raw PWM channel (ww / cw) exposed as a brightness-only light."""
+    """A raw PWM channel exposed as a brightness-only light."""
 
     _attr_has_entity_name = True
     _attr_supported_color_modes = {ColorMode.BRIGHTNESS}

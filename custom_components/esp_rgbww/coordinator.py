@@ -59,6 +59,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._auth_lock = asyncio.Lock()
         self._authenticated = False
         self._data_lock = asyncio.Lock()
+        self._config: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -156,6 +157,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "icon": "palette",
                     "color": {},
                 }
+                presets.append(preset)
                 payload = {"presets[]": [preset]}
             else:
                 preset = dict(presets[preset_index])
@@ -178,6 +180,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 preset["ts"] = now_ms
                 if favorite is not None:
                     preset["favorite"] = favorite
+                presets[preset_index] = preset
                 preset_id = preset.get("id")
                 selector = (
                     f"presets[id={preset_id}]"
@@ -195,7 +198,9 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ) as resp:
                 resp.raise_for_status()
 
-        await self.async_request_refresh()
+            new_data = dict(self.data or {})
+            new_data["presets"] = presets
+            self.async_set_updated_data(new_data)
 
     async def get_cluster_peers(self) -> list[dict[str, str]]:
         """Read /hosts and return deduplicated peers with host and display name."""
@@ -280,6 +285,13 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             color_resp = await self._rpc_request("color", {})
             info_resp = await self._rpc_request("info", {"sparse": "false"})
+            if self._config is None:
+                try:
+                    config_resp = await self._get("/config")
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+                    _LOGGER.debug("Unable to read Lightinator /config: %s", err)
+                    config_resp = {}
+                self._config = config_resp if isinstance(config_resp, dict) else {}
             async with self._data_lock:
                 data_resp = await self._get("/data")
         except (aiohttp.ClientError, RpcError, asyncio.TimeoutError, ConnectionError) as err:
@@ -300,6 +312,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "hsv": color_resp.get("hsv", current.get("hsv", {})),
             "raw": color_resp.get("raw", current.get("raw", {})),
             "info": info_resp,
+            "config": self._config,
             "presets": presets,
             "groups": groups,
         }

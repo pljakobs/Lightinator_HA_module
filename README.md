@@ -7,7 +7,7 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 - **JSON-RPC WebSocket** for light state, commands, and runtime updates; HTTP is retained for presets/groups and cluster-host discovery, which the firmware does not expose over RPC
 - **Automatic discovery** via mDNS (Zeroconf) — no IP configuration needed
 - **Full light entity**: HS colour + colour-temperature (2703 K – 6536 K), brightness, transitions
-- **Per-channel lights** for the dedicated warm-white and cool-white channels
+- **RAW channel controls**: separate brightness lights for each active RGB, warm-white, and cool-white channel, based on the controller's color model
 - **Preset select** — apply saved colour presets from the device
 - **Save preset service** — save the current HSV or raw color under a preset name
 - **Animation controls** — Stop, Skip, Pause, Resume buttons
@@ -36,6 +36,7 @@ You can also add a device manually via **Settings → Devices & Services → Add
 | Entity | Type | Description |
 |--------|------|-------------|
 | `light.<name>` | Light | Main RGBWW light (HS + colour-temp) |
+| `light.<name>_red` / `_green` / `_blue` | Light | Direct raw brightness for RGB channels when enabled by the controller's color model |
 | `light.<name>_warm_white` | Light | Warm-white channel (raw PWM) |
 | `light.<name>_cool_white` | Light | Cool-white channel (raw PWM) |
 | `select.<name>_preset` | Select | Apply a saved colour preset |
