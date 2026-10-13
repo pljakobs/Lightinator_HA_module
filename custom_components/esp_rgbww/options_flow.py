@@ -8,7 +8,7 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry, OptionsFlow, OptionsFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_DEVICE_NAME, CONF_HOST, CONF_PASSWORD
 
 from .const import DOMAIN
@@ -40,14 +40,14 @@ class LightinatorOptionsFlow(OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> OptionsFlowResult:
+    ) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init", menu_options=["color", "network"]
         )
 
     async def async_step_color(
         self, user_input: dict[str, Any] | None = None
-    ) -> OptionsFlowResult:
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         try:
             config = await self._config()
@@ -152,7 +152,7 @@ class LightinatorOptionsFlow(OptionsFlow):
 
     async def async_step_network(
         self, user_input: dict[str, Any] | None = None
-    ) -> OptionsFlowResult:
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         try:
             config = await self._config()
