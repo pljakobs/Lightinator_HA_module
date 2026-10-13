@@ -4,7 +4,7 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 
 ## Features
 
-- **Local push** via WebSocket — instant state updates without polling
+- **JSON-RPC WebSocket** for light state, commands, and runtime updates; HTTP is retained for presets/groups and cluster-host discovery, which the firmware does not expose over RPC
 - **Automatic discovery** via mDNS (Zeroconf) — no IP configuration needed
 - **Full light entity**: HS colour + colour-temperature (2700 K – 6500 K), brightness, transitions
 - **Per-channel lights** for the dedicated warm-white and cool-white channels
@@ -49,16 +49,8 @@ You can also add a device manually via **Settings → Devices & Services → Add
 
 ## Colour Temperature
 
-The firmware maps colour temperature to a 0–100 scale:
-
-- **0** = pure RGB (no white channels)
-- **100** = maximum warm-white / cool-white bias
-
-HA mireds are converted as:
-
-```
-firmware_ct = round((mireds - 153) * 100 / 217)
-```
+The firmware's `hsv.ct` value is Kelvin. The integration sends and reads that
+value directly; Home Assistant handles Kelvin/mired conversion for display.
 
 ## License
 

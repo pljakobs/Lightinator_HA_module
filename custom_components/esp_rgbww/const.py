@@ -7,11 +7,6 @@ UPDATE_INTERVAL = 30  # seconds between fallback polls
 
 MDNS_TYPE = "_lightinator-api._tcp.local."
 
-# Firmware colour-temperature range (mireds — used for conversion only)
-CT_MIN_MIREDS = 153   # ~6536 K — cool white
-CT_MAX_MIREDS = 370   # ~2703 K — warm white
-CT_MIREDS_RANGE = CT_MAX_MIREDS - CT_MIN_MIREDS  # 217
-
 # HA 2024.2+ uses Kelvin natively
 CT_MIN_KELVIN = 2703   # warmest (370 mireds)
 CT_MAX_KELVIN = 6536   # coolest (153 mireds)

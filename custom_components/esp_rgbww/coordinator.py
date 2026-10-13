@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, UPDATE_INTERVAL
+from .rpc import RpcError, authenticate_websocket
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +50,10 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._ws_connected: bool = False
         self._closing: bool = False
+        self._ws_ready = asyncio.Event()
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._next_request_id = 3
+        self._send_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -73,15 +78,21 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def post(self, path: str, payload: dict | None = None) -> None:
-        """POST a command to the device."""
-        url = self._base_url() + path
-        async with self._session.post(
-            url,
-            json=payload,
-            auth=self._auth(),
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            resp.raise_for_status()
+        """Send a firmware command using its JSON-RPC method."""
+        method = path.strip("/")
+        if method not in {
+            "color",
+            "stop",
+            "skip",
+            "pause",
+            "continue",
+            "blink",
+            "toggle",
+            "on",
+            "off",
+        }:
+            raise ValueError(f"Unsupported Lightinator command: {path}")
+        await self._rpc_request(method, payload or {})
 
     async def get_json(self, path: str) -> Any:
         """GET and parse JSON from a device endpoint."""
@@ -106,6 +117,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 item.get("host")
                 or item.get("ip")
                 or item.get("address")
+                or item.get("ip_address")
                 or item.get("hostname")
             )
             display_name = (
@@ -156,21 +168,21 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True while the WebSocket link is up."""
         return self._ws_connected
 
+    async def async_wait_connected(self) -> None:
+        """Wait until the WebSocket is authenticated and ready for requests."""
+        await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
+
     # ------------------------------------------------------------------
     # DataUpdateCoordinator hook  (fallback poll)
     # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch current state from the device (HTTP fallback).
-
-        When WS is connected this still runs periodically to keep
-        info/preset data fresh.
-        """
+        """Fetch RPC state plus REST-only presets and groups."""
         try:
-            color_resp = await self._get("/color")
-            info_resp = await self._get("/info?v=2")
+            color_resp = await self._rpc_request("color", {})
+            info_resp = await self._rpc_request("info", {"sparse": "false"})
             data_resp = await self._get("/data")
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, RpcError, asyncio.TimeoutError, ConnectionError) as err:
             raise UpdateFailed(f"Error communicating with Lightinator: {err}") from err
 
         presets = (
@@ -196,37 +208,61 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # WebSocket listener
     # ------------------------------------------------------------------
 
-    async def async_connect_ws(self) -> None:
-        """Open a WebSocket to the device and listen for push events.
+    async def _rpc_request(
+        self, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Send a JSON-RPC request over the active WebSocket."""
+        await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
+        ws = self._ws
+        if ws is None or ws.closed:
+            raise ConnectionError("Lightinator WebSocket is not connected")
 
-        Reconnects automatically with exponential backoff.
-        Stops cleanly when async_disconnect_ws() is called.
-        """
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        future = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = future
+        try:
+            async with self._send_lock:
+                await ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": method,
+                        "params": params,
+                    }
+                )
+            response = await asyncio.wait_for(future, timeout=10)
+        finally:
+            self._pending.pop(request_id, None)
+
+        error = response.get("error")
+        if isinstance(error, dict):
+            raise RpcError(error.get("code"), str(error.get("message", method)))
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RpcError(None, f"Invalid response for JSON-RPC method '{method}'")
+        return result
+
+    async def async_connect_ws(self) -> None:
+        """Maintain an authenticated JSON-RPC WebSocket with reconnect backoff."""
         backoff = _WS_BACKOFF_INITIAL
         while not self._closing:
+            reader: asyncio.Task | None = None
             try:
                 ws_url = f"ws://{self._host}:{self._port}/ws"
                 async with self._session.ws_connect(
                     ws_url, heartbeat=30
                 ) as ws:
                     self._ws = ws
+                    await authenticate_websocket(ws, self._password)
+                    self._next_request_id = 3
+                    reader = asyncio.create_task(self._listen_ws(ws))
                     self._ws_connected = True
+                    self._ws_ready.set()
                     backoff = _WS_BACKOFF_INITIAL
                     _LOGGER.debug("Lightinator WS connected to %s", ws_url)
-
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            try:
-                                await self._handle_ws_message(msg.json())
-                            except Exception:  # noqa: BLE001
-                                _LOGGER.debug(
-                                    "Failed to parse WS message: %s", msg.data
-                                )
-                        elif msg.type in (
-                            aiohttp.WSMsgType.ERROR,
-                            aiohttp.WSMsgType.CLOSE,
-                        ):
-                            break
+                    await self._rpc_request("runtime_info_subscribe", {})
+                    await reader
 
             except asyncio.CancelledError:
                 return
@@ -235,8 +271,13 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Lightinator WS error (%s), retrying in %ds", err, backoff
                 )
             finally:
+                self._ws_ready.clear()
                 self._ws_connected = False
                 self._ws = None
+                self._fail_pending(ConnectionError("Lightinator WebSocket disconnected"))
+                if reader and not reader.done():
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
 
             if self._closing:
                 return
@@ -244,31 +285,89 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _WS_BACKOFF_MAX)
 
-    async def _handle_ws_message(self, msg: dict) -> None:
-        """Process an incoming WebSocket message and update coordinator data."""
-        msg_type = msg.get("type")
-        data = msg.get("data", {})
+    async def _listen_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Dispatch JSON-RPC responses and server notifications."""
+        try:
+            async for message in ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    if message.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                        break
+                    continue
+                try:
+                    payload = message.json()
+                except (ValueError, TypeError):
+                    _LOGGER.debug("Ignoring invalid Lightinator WebSocket frame")
+                    continue
+                if not isinstance(payload, dict):
+                    continue
 
-        if msg_type == "color":
+                request_id = payload.get("id")
+                future = self._pending.get(request_id) if isinstance(request_id, int) else None
+                if future and not future.done():
+                    future.set_result(payload)
+                elif isinstance(payload.get("method"), str):
+                    await self._handle_ws_message(payload)
+        finally:
+            self._fail_pending(ConnectionError("Lightinator WebSocket reader stopped"))
+
+    def _fail_pending(self, error: Exception) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(error)
+
+    async def _handle_ws_message(self, msg: dict) -> None:
+        """Process JSON-RPC notifications from the firmware."""
+        method = msg.get("method")
+        params = msg.get("params", {})
+        if not isinstance(params, dict):
+            return
+
+        if method == "color_event":
             new_data = dict(self.data or {})
-            if "hsv" in data:
-                new_data["hsv"] = data["hsv"]
-            if "raw" in data:
-                new_data["raw"] = data["raw"]
+            if "hsv" in params:
+                new_data["hsv"] = params["hsv"]
+            if "raw" in params:
+                new_data["raw"] = params["raw"]
+            self.async_set_updated_data(new_data)
+            self.hass.async_create_task(self._refresh_color_state())
+
+        elif method == "runtime_info":
+            new_data = dict(self.data or {})
+            new_data["runtime"] = params
+            info = dict(new_data.get("info", {}))
+            info["runtime"] = params
+            new_data["info"] = info
             self.async_set_updated_data(new_data)
 
-        elif msg_type == "transition_finished":
+        elif method == "transition_finished":
             self.hass.bus.async_fire(
                 f"{DOMAIN}_transition_finished",
                 {
-                    "name": data.get("name", ""),
-                    "requeued": data.get("requeued", False),
+                    "name": params.get("name", ""),
+                    "requeued": params.get("requeued", False),
                     "entry_id": self._entry.entry_id,
                 },
             )
 
+    async def _refresh_color_state(self) -> None:
+        """Read the complete color state after a one-of color notification."""
+        try:
+            color = await self._rpc_request("color", {})
+        except (
+            aiohttp.ClientError,
+            RpcError,
+            asyncio.TimeoutError,
+            ConnectionError,
+        ):
+            return
+        new_data = dict(self.data or {})
+        new_data["hsv"] = color.get("hsv", {})
+        new_data["raw"] = color.get("raw", {})
+        self.async_set_updated_data(new_data)
+
     async def async_disconnect_ws(self) -> None:
         """Signal the WS listener to stop and close the socket."""
         self._closing = True
+        self._ws_ready.clear()
         if self._ws and not self._ws.closed:
             await self._ws.close()

@@ -120,22 +120,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Lightinator from a config entry."""
     session = async_get_clientsession(hass)
     coordinator = LightinatorCoordinator(hass, entry, session)
-
-    try:
-        await coordinator.async_config_entry_first_refresh()
-    except Exception as err:
-        raise ConfigEntryNotReady(f"Cannot connect to Lightinator: {err}") from err
-
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    # Start WebSocket listener as a background task
     entry.async_create_background_task(
         hass,
         coordinator.async_connect_ws(),
         f"lightinator_ws_{entry.entry_id}",
     )
+
+    try:
+        await coordinator.async_wait_connected()
+        await coordinator.async_config_entry_first_refresh()
+    except Exception as err:
+        await coordinator.async_disconnect_ws()
+        raise ConfigEntryNotReady(f"Cannot connect to Lightinator: {err}") from err
+
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register custom services on first entry load
     if not hass.services.has_service(DOMAIN, "fade_sequence"):

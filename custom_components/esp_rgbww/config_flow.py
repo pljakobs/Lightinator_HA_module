@@ -13,59 +13,9 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DEFAULT_PORT, DOMAIN
+from .rpc import RpcAuthenticationError, websocket_request
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class InvalidAuth(Exception):
-    """Raised when the device returns HTTP 401."""
-
-
-async def _fetch_device_info(
-    session: aiohttp.ClientSession,
-    host: str,
-    port: int,
-    password: str,
-) -> dict:
-    """Call GET /info?v=2 and return the parsed JSON.
-
-    Raises InvalidAuth on 401, aiohttp.ClientError on network failure.
-    """
-    auth = aiohttp.BasicAuth("", password) if password else None
-    url = f"http://{host}:{port}/info?v=2"
-    async with session.get(
-        url, auth=auth, timeout=aiohttp.ClientTimeout(total=8)
-    ) as resp:
-        if resp.status == 401:
-            raise InvalidAuth
-        resp.raise_for_status()
-        return await resp.json()
-
-
-async def _fetch_device_name(
-    session: aiohttp.ClientSession,
-    host: str,
-    port: int,
-    password: str,
-) -> str:
-    """Call GET /config and extract the device name, falling back to host."""
-    try:
-        auth = aiohttp.BasicAuth("", password) if password else None
-        url = f"http://{host}:{port}/config"
-        async with session.get(
-            url, auth=auth, timeout=aiohttp.ClientTimeout(total=8)
-        ) as resp:
-            if resp.status != 200:
-                return host
-            cfg = await resp.json()
-            # ConfigDB exports as nested structure; device name is under general
-            return (
-                cfg.get("general", {}).get("deviceName", "")
-                or cfg.get("devicename", "")
-                or host
-            )
-    except Exception:  # noqa: BLE001
-        return host
 
 
 class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -98,8 +48,10 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
             session = async_get_clientsession(self.hass)
 
             try:
-                info = await _fetch_device_info(session, host, port, password)
-            except InvalidAuth:
+                info = await websocket_request(
+                    session, host, port, password, "info", {"sparse": "false"}
+                )
+            except RpcAuthenticationError:
                 errors["base"] = "invalid_auth"
             except (aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
@@ -114,9 +66,7 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(chip_id)
                 self._abort_if_unique_id_configured()
 
-                device_name = await _fetch_device_name(session, host, port, password)
-                if device_name == host and fallback_name:
-                    device_name = fallback_name
+                device_name = fallback_name or self._name or host
 
                 return self.async_create_entry(
                     title=device_name,
@@ -182,10 +132,15 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
             session = async_get_clientsession(self.hass)
 
             try:
-                info = await _fetch_device_info(
-                    session, self._host, self._port, password
+                info = await websocket_request(
+                    session,
+                    self._host,
+                    self._port,
+                    password,
+                    "info",
+                    {"sparse": "false"},
                 )
-            except InvalidAuth:
+            except RpcAuthenticationError:
                 errors["base"] = "invalid_auth"
             except (aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
@@ -201,9 +156,7 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                     await self.async_set_unique_id(chip_id)
                     self._abort_if_unique_id_configured()
 
-                device_name = await _fetch_device_name(
-                    session, self._host, self._port, password
-                )
+                device_name = self._name or self._host
 
                 return self.async_create_entry(
                     title=device_name or self._name,

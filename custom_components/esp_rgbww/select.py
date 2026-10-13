@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, CONF_GROUP_AREA_MAP, DOMAIN
 from .coordinator import LightinatorCoordinator
+from .presets import preset_command, preset_names
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class LightinatorPresetSelect(CoordinatorEntity[LightinatorCoordinator], SelectE
     @property
     def options(self) -> list[str]:
         presets = (self.coordinator.data or {}).get("presets", [])
-        return [p["name"] for p in presets if "name" in p]
+        return preset_names(presets)
 
     @property
     def current_option(self) -> str | None:
@@ -83,18 +84,25 @@ class LightinatorPresetSelect(CoordinatorEntity[LightinatorCoordinator], SelectE
     async def async_select_option(self, option: str) -> None:
         """Apply the selected preset."""
         presets = (self.coordinator.data or {}).get("presets", [])
-        preset = next((p for p in presets if p.get("name") == option), None)
+        preset = next(
+            (
+                p
+                for p in presets
+                if isinstance(p, dict) and p.get("name") == option
+            ),
+            None,
+        )
 
         if preset is None:
             _LOGGER.warning("Preset '%s' not found in device data", option)
             return
 
-        hsv = preset.get("color", {}).get("hsv")
-        if not hsv:
-            _LOGGER.warning("Preset '%s' has no HSV colour data", option)
+        command = preset_command(preset, presets, default_command="solid")
+        if command is None:
+            _LOGGER.warning("Preset '%s' has no supported color", option)
             return
 
-        await self.coordinator.post("/color", {"cmd": "solid", "hsv": hsv})
+        await self.coordinator.post("/color", command)
 
 
 class LightinatorGroupAreaSelect(CoordinatorEntity[LightinatorCoordinator], SelectEntity):

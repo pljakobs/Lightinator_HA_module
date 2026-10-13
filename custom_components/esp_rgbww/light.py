@@ -27,12 +27,11 @@ from .const import (
     CONF_DEVICE_NAME,
     CT_MAX_KELVIN,
     CT_MIN_KELVIN,
-    CT_MIN_MIREDS,
-    CT_MIREDS_RANGE,
     DOMAIN,
     RAW_MAX,
 )
 from .coordinator import LightinatorCoordinator
+from .presets import preset_command, preset_names
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,9 +69,7 @@ async def async_setup_entry(
 class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntity):
     """Main RGBWW light — supports HS colour and colour temperature.
 
-    Colour temperature conversions:
-      firmware ct (0-100)  ←→  mireds (153-370)
-      ct = round((mireds - CT_MIN_MIREDS) * 100 / CT_MIREDS_RANGE)
+    The firmware's hsv.ct value is expressed in Kelvin.
     """
 
     _attr_has_entity_name = True
@@ -115,8 +112,7 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
         ct = hsv.get("ct", 0)
         if not ct:
             return None
-        mireds = CT_MIN_MIREDS + round(ct * CT_MIREDS_RANGE / 100)
-        return round(1_000_000 / mireds)
+        return int(ct)
 
     @property
     def color_mode(self) -> ColorMode:
@@ -128,7 +124,7 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
     @property
     def effect_list(self) -> list[str] | None:
         presets = (self.coordinator.data or {}).get("presets", [])
-        names = [p["name"] for p in presets if "name" in p]
+        names = preset_names(presets)
         return names or None
 
     @property
@@ -150,20 +146,31 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
             preset_name: str = kwargs[ATTR_EFFECT]
             presets = (self.coordinator.data or {}).get("presets", [])
             preset = next(
-                (p for p in presets if p.get("name") == preset_name), None
+                (
+                    p
+                    for p in presets
+                    if isinstance(p, dict) and p.get("name") == preset_name
+                ),
+                None,
             )
-            if preset:
-                p_hsv = preset.get("color", {}).get("hsv", {})
-                hsv.update(
-                    {
-                        "h": p_hsv.get("h", hsv.get("h", 0)),
-                        "s": p_hsv.get("s", hsv.get("s", 100)),
-                        "v": p_hsv.get("v", hsv.get("v", 100)),
-                    }
-                )
-                hsv.pop("ct", None)
-            else:
+            if preset is None:
                 _LOGGER.warning("Preset '%s' not found", preset_name)
+                return
+
+            command = preset_command(
+                preset,
+                presets,
+                default_command="fade",
+                default_transition_ms=ramp,
+                transition_ms=(
+                    ramp if ATTR_TRANSITION in kwargs else None
+                )
+            )
+            if command is None:
+                _LOGGER.warning("Preset '%s' has no supported color", preset_name)
+                return
+            await self.coordinator.post("/color", command)
+            return
         else:
             if ATTR_BRIGHTNESS in kwargs:
                 requested = kwargs[ATTR_BRIGHTNESS]
@@ -172,11 +179,7 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
                 hsv["h"], hsv["s"] = kwargs[ATTR_HS_COLOR]
                 hsv.pop("ct", None)
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
-                kelvin: int = kwargs[ATTR_COLOR_TEMP_KELVIN]
-                mireds = round(1_000_000 / kelvin)
-                hsv["ct"] = round(
-                    (mireds - CT_MIN_MIREDS) * 100 / CT_MIREDS_RANGE
-                )
+                hsv["ct"] = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
                 hsv["s"] = 0
 
         # Ensure the light actually turns on if brightness was 0

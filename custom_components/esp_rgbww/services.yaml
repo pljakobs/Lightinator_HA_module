@@ -13,7 +13,7 @@ fade_sequence:
       description: >
         List of colour steps. Each step is an object with at minimum one colour
         key and a duration. Supported keys per step:
-          hsv   – HSV colour object with optional h (0-360), s (0-100), v (0-100), ct (100-500 or 2000-10000).
+          hsv   – HSV colour object with optional h (0-360), s (0-100), v (0-100), ct (Kelvin).
           raw   – Raw PWM values object with optional r, g, b, ww, cw (0-1023).
           t     – Duration in milliseconds (integer). Omit for an instant jump.
           cmd   – "fade" (default) or "solid" (instant set).
