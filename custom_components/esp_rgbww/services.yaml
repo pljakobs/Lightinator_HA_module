@@ -114,3 +114,28 @@ save_preset:
       description: Mark the preset as a favorite (leave empty to preserve its current value).
       selector:
         boolean:
+
+scan_wifi:
+  name: Scan Wi-Fi networks
+  description: Start a Wi-Fi scan on the selected controller.
+  target:
+    device:
+      integration: esp_rgbww
+
+connect_wifi:
+  name: Connect to Wi-Fi
+  description: Connect the selected controller to a Wi-Fi network.
+  target:
+    device:
+      integration: esp_rgbww
+  fields:
+    ssid:
+      name: SSID
+      required: true
+      selector:
+        text:
+    password:
+      name: Wi-Fi password
+      selector:
+        text:
+          type: password

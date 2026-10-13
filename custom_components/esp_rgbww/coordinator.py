@@ -59,7 +59,9 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._auth_lock = asyncio.Lock()
         self._authenticated = False
         self._data_lock = asyncio.Lock()
+        self._config_lock = asyncio.Lock()
         self._config: dict[str, Any] | None = None
+        self._config_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -78,6 +80,102 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ) as resp:
             resp.raise_for_status()
             return await resp.json()
+
+    async def async_get_config(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Read controller config once, or refresh it for an explicit edit form."""
+        async with self._config_lock:
+            if self._config is None or force_refresh:
+                config = await self._get("/config")
+                self._config = config if isinstance(config, dict) else {}
+            return self._config
+
+    async def async_update_config(self, update: dict[str, Any]) -> None:
+        """Apply one partial ConfigDB update without exporting unrelated data."""
+        if not update:
+            return
+
+        async with self._config_lock:
+            if self._config is None:
+                config = await self._get("/config")
+                self._config = config if isinstance(config, dict) else {}
+            url = self._base_url() + "/config"
+            async with self._session.post(
+                url,
+                json=update,
+                auth=self._auth(),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                resp.raise_for_status()
+            self._merge_config(self._config, update)
+            safe_config = self._safe_config_view(self._config)
+
+        new_data = dict(self.data or {})
+        new_data["config"] = safe_config
+        self.async_set_updated_data(new_data)
+
+    async def async_post_http(self, path: str, payload: dict[str, Any]) -> Any:
+        """POST one authenticated JSON request to a firmware HTTP endpoint."""
+        url = self._base_url() + path
+        async with self._session.post(
+            url,
+            json=payload,
+            auth=self._auth(),
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            resp.raise_for_status()
+            if resp.content_type == "application/json":
+                return await resp.json()
+            return await resp.text()
+
+    @classmethod
+    def _merge_config(cls, target: dict[str, Any], update: dict[str, Any]) -> None:
+        for key, value in update.items():
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                cls._merge_config(target[key], value)
+            else:
+                target[key] = value
+
+    @staticmethod
+    def _safe_config_view(config: dict[str, Any]) -> dict[str, Any]:
+        """Project non-secret values needed by HA without exposing credentials."""
+        general = config.get("general", {})
+        color = config.get("color", {})
+        network = config.get("network", {})
+        general = general if isinstance(general, dict) else {}
+        color = color if isinstance(color, dict) else {}
+        network = network if isinstance(network, dict) else {}
+
+        color_view = {
+            key: color[key]
+            for key in ("color_mode", "brightness", "colortemp", "hsv")
+            if key in color
+        }
+        network_view: dict[str, Any] = {}
+        for section in ("connection", "rsyslog", "telemetry", "ntp"):
+            values = network.get(section)
+            if isinstance(values, dict):
+                network_view[section] = {
+                    key: value
+                    for key, value in values.items()
+                    if key not in {"password", "api_password"}
+                }
+        mqtt = network.get("mqtt")
+        if isinstance(mqtt, dict):
+            network_view["mqtt"] = {
+                key: value
+                for key, value in mqtt.items()
+                if key not in {"password", "username"}
+            }
+
+        return {
+            "general": {
+                key: general[key]
+                for key in ("device_name", "supported_color_models")
+                if key in general
+            },
+            "color": color_view,
+            "network": network_view,
+        }
 
     # ------------------------------------------------------------------
     # Public API used by entities
@@ -285,13 +383,12 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             color_resp = await self._rpc_request("color", {})
             info_resp = await self._rpc_request("info", {"sparse": "false"})
-            if self._config is None:
-                try:
-                    config_resp = await self._get("/config")
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-                    _LOGGER.debug("Unable to read Lightinator /config: %s", err)
-                    config_resp = {}
-                self._config = config_resp if isinstance(config_resp, dict) else {}
+            try:
+                config = await self.async_get_config()
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+                _LOGGER.debug("Unable to read Lightinator /config: %s", err)
+                self._config = {}
+                config = self._config
             async with self._data_lock:
                 data_resp = await self._get("/data")
         except (aiohttp.ClientError, RpcError, asyncio.TimeoutError, ConnectionError) as err:
@@ -312,7 +409,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "hsv": color_resp.get("hsv", current.get("hsv", {})),
             "raw": color_resp.get("raw", current.get("raw", {})),
             "info": info_resp,
-            "config": self._config,
+            "config": self._safe_config_view(config),
             "presets": presets,
             "groups": groups,
         }
@@ -501,6 +598,12 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "requeued": params.get("requeued", False),
                     "entry_id": self._entry.entry_id,
                 },
+            )
+
+        elif method == "ota_status":
+            self.hass.bus.async_fire(
+                f"{DOMAIN}_ota_status",
+                {**params, "entry_id": self._entry.entry_id},
             )
 
     async def _refresh_color_state(self) -> None:

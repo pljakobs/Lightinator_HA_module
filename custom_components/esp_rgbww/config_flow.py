@@ -8,11 +8,12 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 from homeassistant.components import zeroconf
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DEFAULT_PORT, DOMAIN
+from .options_flow import LightinatorOptionsFlow
 from .rpc import RpcAuthenticationError, websocket_request
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,16 +48,15 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        return LightinatorOptionsFlow(config_entry)
+
     def __init__(self) -> None:
-        """Initialise."""
         self._host: str = ""
         self._port: int = DEFAULT_PORT
         self._name: str = ""
         self._chip_id: str = ""
-
-    # ------------------------------------------------------------------
-    # Manual entry
-    # ------------------------------------------------------------------
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -93,8 +93,7 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                 configured_name = await _fetch_device_name(
                     session, host, port, password
                 )
-                device_name = configured_name or fallback_name or self._name or host
-
+                device_name = configured_name or fallback_name or host
                 return self.async_create_entry(
                     title=device_name,
                     data={
@@ -118,17 +117,12 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ------------------------------------------------------------------
-    # Zeroconf (mDNS) discovery
-    # ------------------------------------------------------------------
-
     async def async_step_zeroconf(
         self, discovery_info: zeroconf.ZeroconfServiceInfo
     ) -> ConfigFlowResult:
         """Handle a device discovered via mDNS."""
         self._host = discovery_info.host
         self._port = discovery_info.port or DEFAULT_PORT
-        # _lightinator-api._tcp TXT carries id= (chip id) and v=2 (API version)
         self._name = (
             discovery_info.properties.get("fn")
             or discovery_info.name.split(".")[0]
@@ -151,13 +145,12 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_zeroconf_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm a Zeroconf-discovered device and optionally enter password."""
+        """Confirm a discovered controller and optionally accept its password."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
             password = user_input.get(CONF_PASSWORD, "")
             session = async_get_clientsession(self.hass)
-
             try:
                 info = await websocket_request(
                     session,
@@ -187,28 +180,20 @@ class LightinatorConfigFlow(ConfigFlow, domain=DOMAIN):
                     session, self._host, self._port, password
                 )
                 device_name = configured_name or self._name or self._host
-
                 return self.async_create_entry(
-                    title=device_name or self._name,
+                    title=device_name,
                     data={
                         CONF_HOST: self._host,
                         CONF_PORT: self._port,
                         CONF_PASSWORD: password,
                         CONF_CHIP_ID: chip_id,
-                        CONF_DEVICE_NAME: device_name or self._name,
+                        CONF_DEVICE_NAME: device_name,
                     },
                 )
 
         return self.async_show_form(
             step_id="zeroconf_confirm",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_PASSWORD, default=""): str,
-                }
-            ),
-            description_placeholders={
-                "name": self._name,
-                "host": self._host,
-            },
+            data_schema=vol.Schema({vol.Optional(CONF_PASSWORD, default=""): str}),
+            description_placeholders={"name": self._name, "host": self._host},
             errors=errors,
         )

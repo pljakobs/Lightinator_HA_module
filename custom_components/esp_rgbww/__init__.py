@@ -81,6 +81,23 @@ def _register_services(hass: HomeAssistant) -> None:
         for coordinator in _get_coordinators_for_call(hass, call):
             await coordinator.save_current_preset(name, color_mode, favorite)
 
+    async def handle_scan_wifi(call: ServiceCall) -> None:
+        """Start a Wi-Fi scan on the selected controller(s)."""
+        for coordinator in _get_coordinators_for_call(hass, call):
+            await coordinator.async_post_http("/scan_networks", {})
+
+    async def handle_connect_wifi(call: ServiceCall) -> None:
+        """Connect a controller to the requested Wi-Fi network."""
+        ssid = str(call.data["ssid"]).strip()
+        if not ssid:
+            raise ValueError("SSID cannot be empty")
+        payload = {"ssid": ssid}
+        password = call.data.get("password")
+        if password:
+            payload["password"] = password
+        for coordinator in _get_coordinators_for_call(hass, call):
+            await coordinator.async_post_http("/connect", payload)
+
     async def handle_discover_cluster(call: ServiceCall) -> None:
         """Discover and add controllers listed by /hosts on target device(s)."""
         added = 0
@@ -126,6 +143,8 @@ def _register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "blink", handle_blink)
     hass.services.async_register(DOMAIN, "discover_cluster", handle_discover_cluster)
     hass.services.async_register(DOMAIN, "save_preset", handle_save_preset)
+    hass.services.async_register(DOMAIN, "scan_wifi", handle_scan_wifi)
+    hass.services.async_register(DOMAIN, "connect_wifi", handle_connect_wifi)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
