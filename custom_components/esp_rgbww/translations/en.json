@@ -1,0 +1,118 @@
+{
+  "services": {
+    "discover_cluster": {
+      "name": "Discover Cluster Controllers",
+      "description": "Query a known controller's /hosts endpoint and add missing peers."
+    },
+    "save_preset": {
+      "name": "Save current color as preset",
+      "description": "Save or update a controller-local preset from its current color."
+    },
+    "scan_wifi": {
+      "name": "Scan Wi-Fi networks",
+      "description": "Start a Wi-Fi scan on the selected controller."
+    },
+    "connect_wifi": {
+      "name": "Connect to Wi-Fi",
+      "description": "Connect the selected controller to a Wi-Fi network."
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Lightinator",
+        "description": "Connect to an ESP RGBWW Lightinator device.",
+        "data": {
+          "host": "IP address or hostname",
+          "port": "Port",
+          "password": "Password (leave empty if not set)"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Discovered Lightinator",
+        "description": "Found **{name}** at `{host}`. Do you want to add it?",
+        "data": {
+          "password": "Password (leave empty if not set)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the device. Check the IP address and that the device is reachable.",
+      "invalid_auth": "Incorrect password.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "not_lightinator": "The device did not respond as a Lightinator."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Lightinator settings",
+        "menu_options": {
+          "color": "Color settings",
+          "network": "Network settings"
+        }
+      },
+      "color": {
+        "title": "Color settings",
+        "description": "These values are saved together. Changing the output model reboots the controller.",
+        "data": {
+          "color_model": "Output color model",
+          "transition_mode": "HSV transition mode",
+          "brightness_red": "Red channel brightness (%)",
+          "brightness_green": "Green channel brightness (%)",
+          "brightness_blue": "Blue channel brightness (%)",
+          "brightness_ww": "Warm-white brightness (%)",
+          "brightness_cw": "Cool-white brightness (%)",
+          "colortemp_ww": "Warm-white temperature (K)",
+          "colortemp_cw": "Cool-white temperature (K)",
+          "hsv_red": "Red hue correction",
+          "hsv_yellow": "Yellow hue correction",
+          "hsv_green": "Green hue correction",
+          "hsv_cyan": "Cyan hue correction",
+          "hsv_blue": "Blue hue correction",
+          "hsv_magenta": "Magenta hue correction"
+        }
+      },
+      "network": {
+        "title": "Network settings",
+        "description": "DHCP, IP address, netmask, and gateway are sent in one update. Leave secret fields blank to keep saved credentials.",
+        "data": {
+          "device_name": "Controller hostname",
+          "dhcp": "Use DHCP",
+          "ip": "Static IP address",
+          "netmask": "Netmask",
+          "gateway": "Gateway",
+          "mqtt_enabled": "Enable MQTT",
+          "mqtt_server": "MQTT server",
+          "mqtt_port": "MQTT port",
+          "mqtt_topic_base": "MQTT topic base",
+          "mqtt_username": "MQTT username",
+          "mqtt_password": "New MQTT password (optional)",
+          "mqtt_clear_password": "Clear MQTT password",
+          "ha_discovery_enabled": "Enable Home Assistant discovery",
+          "ha_discovery_prefix": "Discovery prefix",
+          "ha_node_id": "Home Assistant node ID",
+          "rsyslog_enabled": "Enable syslog",
+          "rsyslog_host": "Syslog host",
+          "rsyslog_port": "Syslog port",
+          "telemetry_stats_enabled": "Enable statistics telemetry",
+          "telemetry_log_enabled": "Enable log telemetry",
+          "telemetry_url": "Telemetry URL",
+          "telemetry_user": "Telemetry username",
+          "telemetry_password": "New telemetry password (optional)",
+          "telemetry_clear_password": "Clear telemetry password",
+          "api_secured": "Require API password",
+          "api_password": "New API password (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not read or update the controller configuration.",
+      "invalid_network": "Check that the static gateway is in the same subnet as the controller IP.",
+      "password_required": "Enter an API password before enabling protection."
+    }
+  }
+}

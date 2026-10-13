@@ -33,7 +33,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: LightinatorCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([LightinatorFirmwareUpdate(coordinator, entry)])
+    async_add_entities(
+        [LightinatorFirmwareUpdate(coordinator, entry)], update_before_add=True
+    )
 
 
 class LightinatorFirmwareUpdate(
