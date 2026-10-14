@@ -1,6 +1,6 @@
 # Lightinator — Home Assistant Custom Integration
 
-<img align="right" width="96" src="custom_components/esp_rgbww/brand/icon.png" alt="Lightinator icon">
+<img align="right" width="96" height="96" src="custom_components/esp_rgbww/brand/icon-dark.svg" alt="Lightinator Home Assistant icon">
 
 A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.com/pljakobs/esp_rgbww_firmware) RGBWW LED controller.
 

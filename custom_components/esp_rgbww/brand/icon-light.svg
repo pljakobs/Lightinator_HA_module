@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Lightinator Home Assistant - Light</title>
+  <rect x="4" y="4" width="248" height="248" rx="38" fill="#f3f7f6"/>
+  <circle cx="128" cy="128" r="104" fill="none" stroke="#72c4bd" stroke-width="5" stroke-dasharray="13 11"/>
+  <path d="M72 177v-59l56-43 56 43v59H72Z" fill="#238d89" fill-opacity="0.14" stroke="#249e99" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="none" stroke="#42b5ad" stroke-width="8" stroke-linecap="round">
+    <path d="M128 128 128 31"/><path d="M128 128 213 78"/><path d="M128 128 213 178"/>
+    <path d="M128 128 128 225"/><path d="M128 128 43 178"/><path d="M128 128 43 78"/>
+  </g>
+  <g stroke="#f3f7f6" stroke-width="3">
+    <circle cx="128" cy="31" r="14" fill="#2878c6"/><circle cx="213" cy="78" r="14" fill="#3295df"/>
+    <circle cx="213" cy="178" r="14" fill="#13b3c3"/><circle cx="128" cy="225" r="14" fill="#5bc7bb"/>
+    <circle cx="43" cy="178" r="14" fill="#13a783"/><circle cx="43" cy="78" r="14" fill="#f3c44f"/>
+  </g>
+  <circle cx="128" cy="128" r="23" fill="#ffffff" stroke="#42b5ad" stroke-width="8"/>
+</svg>
