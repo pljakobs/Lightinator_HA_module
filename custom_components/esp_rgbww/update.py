@@ -56,7 +56,9 @@ class LightinatorFirmwareUpdate(
     _attr_has_entity_name = True
     _attr_name = "Firmware"
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_supported_features = UpdateEntityFeature.INSTALL
+    _attr_supported_features = (
+        UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
+    )
 
     @property
     def should_poll(self) -> bool:
@@ -80,6 +82,10 @@ class LightinatorFirmwareUpdate(
         self._ota_url = ""
         self._in_progress = False
         self._ota_message = ""
+        self._ota_expected_version: str | None = None
+        self._ota_expected_type: str | None = None
+        self._ota_connection_generation: int | None = None
+        self._verification_task: asyncio.Task | None = None
 
     async def async_update(self) -> None:
         """Fetch compatible firmware from the Lightinator version API."""
@@ -213,6 +219,9 @@ class LightinatorFirmwareUpdate(
         }:
             raise RuntimeError("The requested firmware version is no longer selected")
 
+        self._ota_expected_version = candidate_version
+        self._ota_expected_type = str(self._candidate.get("type", "")).lower()
+        self._ota_connection_generation = self.coordinator.ws_generation
         self._in_progress = True
         self._ota_message = "Firmware update started"
         self.async_write_ha_state()
@@ -226,6 +235,9 @@ class LightinatorFirmwareUpdate(
         except Exception:
             self._in_progress = False
             self._ota_message = "Firmware update could not be started"
+            self._ota_expected_version = None
+            self._ota_expected_type = None
+            self._ota_connection_generation = None
             self.async_write_ha_state()
             raise
 
@@ -241,8 +253,73 @@ class LightinatorFirmwareUpdate(
             return
         status = event.data.get("status")
         self._ota_message = str(event.data.get("message", ""))
-        if status in (0, 4):
+        if status == 0:
             self._in_progress = False
+            self._ota_expected_version = None
+            self._ota_expected_type = None
+            self._ota_connection_generation = None
+        elif status == 4:
+            # The firmware emits status 4 immediately before rebooting.
+            # Keep the update active until its new WebSocket verifies /info.
+            self._in_progress = True
+            self._start_firmware_verification()
         else:
             self._in_progress = True
+        self.async_write_ha_state()
+
+    def _start_firmware_verification(self) -> None:
+        if self._verification_task and not self._verification_task.done():
+            return
+
+        expected_version = self._ota_expected_version or self.latest_version
+        expected_type = self._ota_expected_type
+        previous_generation = self._ota_connection_generation
+        if expected_version is None:
+            self._in_progress = False
+            self._ota_message = "Firmware rebooted, but no expected version is available"
+            return
+        if previous_generation is None:
+            previous_generation = self.coordinator.ws_generation
+
+        self._verification_task = self.hass.async_create_task(
+            self._verify_firmware_after_reboot(
+                expected_version, expected_type, previous_generation
+            ),
+            "lightinator_firmware_version_verification",
+        )
+        self.async_on_remove(self._verification_task.cancel)
+
+    async def _verify_firmware_after_reboot(
+        self,
+        expected_version: str,
+        expected_type: str | None,
+        previous_generation: int,
+    ) -> None:
+        try:
+            await self.coordinator.async_wait_for_reconnect(previous_generation)
+            info = await self.coordinator.async_refresh_info()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Unable to verify Lightinator firmware after OTA: %s", err)
+            self._ota_message = "Timed out waiting to verify the firmware after reboot"
+        else:
+            app = info.get("app", {}) if isinstance(info, dict) else {}
+            app = app if isinstance(app, dict) else {}
+            installed_version = str(app.get("git_version", ""))
+            installed_type = str(app.get("build_type", "")).lower()
+            if installed_version == expected_version and (
+                expected_type is None or installed_type == expected_type
+            ):
+                self._ota_message = f"Firmware update verified: {installed_version}"
+            else:
+                self._ota_message = (
+                    f"Rebooted into {installed_version or 'unknown'} ({installed_type}); "
+                    f"expected {expected_version} ({expected_type or 'unknown'})"
+                )
+
+        self._in_progress = False
+        self._ota_expected_version = None
+        self._ota_expected_type = None
+        self._ota_connection_generation = None
         self.async_write_ha_state()
