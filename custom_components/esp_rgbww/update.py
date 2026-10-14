@@ -48,6 +48,10 @@ class LightinatorFirmwareUpdate(
     _attr_entity_category = EntityCategory.CONFIG
     _attr_supported_features = UpdateEntityFeature.INSTALL
 
+    @property
+    def should_poll(self) -> bool:
+        return True
+
     def __init__(
         self, coordinator: LightinatorCoordinator, entry: ConfigEntry
     ) -> None:
