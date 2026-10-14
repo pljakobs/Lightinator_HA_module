@@ -1,7 +1,7 @@
 {
   "domain": "esp_rgbww",
   "name": "Lightinator (ESP RGBWW)",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "codeowners": ["@pljakobs"],
   "config_flow": true,
   "documentation": "https://github.com/pljakobs/esp_rgbww_firmware",
