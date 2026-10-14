@@ -56,7 +56,9 @@ class LightinatorFirmwareUpdate(
     _attr_has_entity_name = True
     _attr_name = "Firmware"
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_supported_features = UpdateEntityFeature.INSTALL
+    _attr_supported_features = (
+        UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
+    )
 
     @property
     def should_poll(self) -> bool:
