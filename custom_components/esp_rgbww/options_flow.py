@@ -366,9 +366,9 @@ class LightinatorOptionsFlow(OptionsFlow):
                 ): bool,
                 vol.Optional("api_password"): str,
                 vol.Required("dhcp", default=connection.get("dhcp", True)): bool,
-                vol.Required("ip", default=connection.get("ip", "192.168.1.1")): vol.All(str, _ipv4),
-                vol.Required("netmask", default=connection.get("netmask", "255.255.255.0")): vol.All(str, _ipv4),
-                vol.Required("gateway", default=connection.get("gateway", "192.168.1.255")): vol.All(str, _ipv4),
+                vol.Required("ip", default=connection.get("ip", "192.168.1.1")): str,
+                vol.Required("netmask", default=connection.get("netmask", "255.255.255.0")): str,
+                vol.Required("gateway", default=connection.get("gateway", "192.168.1.255")): str,
                 vol.Required("mqtt_enabled", default=mqtt.get("enabled", False)): bool,
                 vol.Required("mqtt_server", default=mqtt.get("server", "mqtt.local")): str,
                 vol.Required("mqtt_port", default=mqtt.get("port", 1883)): vol.All(
