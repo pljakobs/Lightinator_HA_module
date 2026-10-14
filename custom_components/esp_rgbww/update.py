@@ -254,13 +254,15 @@ class LightinatorFirmwareUpdate(
         status = event.data.get("status")
         self._ota_message = str(event.data.get("message", ""))
         if status == 0:
+            if self._verification_task and not self._verification_task.done():
+                self._verification_task.cancel()
             self._in_progress = False
             self._ota_expected_version = None
             self._ota_expected_type = None
             self._ota_connection_generation = None
-        elif status == 4:
-            # The firmware emits status 4 immediately before rebooting.
-            # Keep the update active until its new WebSocket verifies /info.
+        elif status in (3, 4):
+            # Status 3 precedes the result decision; status 4 is sent just
+            # before reboot and may be lost with the old WebSocket connection.
             self._in_progress = True
             self._start_firmware_verification()
         else:
