@@ -1,5 +1,7 @@
 # Lightinator — Home Assistant Custom Integration
 
+<img align="right" width="96" src="custom_components/esp_rgbww/brand/icon.png" alt="Lightinator icon">
+
 A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.com/pljakobs/esp_rgbww_firmware) RGBWW LED controller.
 
 ## Features
@@ -31,7 +33,7 @@ Copy the `custom_components/esp_rgbww/` folder into your HA `config/custom_compo
 
 ## Configuration
 
-Devices are discovered automatically via mDNS (`_http._tcp.local.` with `fn=LED Controller API`).  
+Devices are discovered automatically via mDNS (`_lightinator-api._tcp.local.`), using the controller's chip ID for stable identity.
 You can also add a device manually via **Settings → Devices & Services → Add Integration → Lightinator**.
 
 Use the integration's **Configure** action for color and network settings. Static
