@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - "v*.*.*"
 
@@ -15,8 +17,51 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag merged manifest version
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            version="$(jq -er '.version' custom_components/esp_rgbww/manifest.json)"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid manifest version: $version"
+              exit 1
+            fi
+
+            tag="v${version}"
+            git fetch --tags origin
+            if git rev-parse --verify "$tag^{commit}" >/dev/null 2>&1; then
+              existing_commit="$(git rev-parse "$tag^{commit}")"
+              if [[ "$existing_commit" != "$GITHUB_SHA" ]]; then
+                echo "::error::Tag $tag already points to $existing_commit"
+                exit 1
+              fi
+            else
+              latest_tag="$(git tag --list 'v[0-9]*' --sort=-version:refname | head -n1)"
+              if [[ -n "$latest_tag" ]]; then
+                latest_version="${latest_tag#v}"
+                newest_version="$(printf '%s\n' "$latest_version" "$version" | sort -V | tail -n1)"
+                if [[ "$newest_version" != "$version" ]]; then
+                  echo "::error::Manifest version $version is not newer than $latest_tag"
+                  exit 1
+                fi
+              fi
+
+              git tag -a "$tag" "$GITHUB_SHA" -m "Release $tag"
+              git push origin "refs/tags/$tag"
+            fi
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
