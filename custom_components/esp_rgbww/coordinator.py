@@ -53,6 +53,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ws_connected: bool = False
         self._closing: bool = False
         self._ws_ready = asyncio.Event()
+        self._ws_generation: int = 0
+        self._ws_generation_changed = asyncio.Event()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._next_request_id = 1
         self._send_lock = asyncio.Lock()
@@ -370,6 +372,32 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True while the WebSocket link is up."""
         return self._ws_connected
 
+    @property
+    def ws_generation(self) -> int:
+        """Return the number of authenticated WebSocket connections."""
+        return self._ws_generation
+
+    async def async_wait_for_reconnect(
+        self, previous_generation: int, timeout: float = 300
+    ) -> None:
+        """Wait for an authenticated WebSocket connection newer than the given one."""
+        async def wait_for_generation() -> None:
+            while self._ws_generation <= previous_generation:
+                self._ws_generation_changed.clear()
+                if self._ws_generation > previous_generation:
+                    return
+                await self._ws_generation_changed.wait()
+
+        await asyncio.wait_for(wait_for_generation(), timeout=timeout)
+
+    async def async_refresh_info(self) -> dict[str, Any]:
+        """Read fresh firmware info over RPC after a reconnect."""
+        info = await self._rpc_request("info", {"sparse": "false"})
+        new_data = dict(self.data or {})
+        new_data["info"] = info
+        self.async_set_updated_data(new_data)
+        return info
+
     async def async_wait_connected(self) -> None:
         """Wait until the WebSocket is authenticated and ready for requests."""
         await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
@@ -511,6 +539,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "runtime_info_subscribe", {}, wait_ready=False
                     )
                     self._ws_connected = True
+                    self._ws_generation += 1
+                    self._ws_generation_changed.set()
                     self._ws_ready.set()
                     await reader
 
