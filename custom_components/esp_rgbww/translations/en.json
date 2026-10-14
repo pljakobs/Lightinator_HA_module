@@ -52,7 +52,8 @@
         "title": "Lightinator settings",
         "menu_options": {
           "color": "Color settings",
-          "network": "Network settings"
+          "network": "Network settings",
+          "firmware": "Firmware updates"
         }
       },
       "color": {
@@ -107,12 +108,27 @@
           "api_secured": "Require API password",
           "api_password": "New API password (optional)"
         }
+      },
+      "firmware": {
+        "title": "Firmware updates",
+        "description": "Choose the firmware branch and build type offered by the Lightinator version API.",
+        "data": {
+          "firmware_branch": "Firmware branch"
+        }
+      },
+      "firmware_type": {
+        "title": "Firmware build type",
+        "description": "Choose a release or debug build available for the selected branch.",
+        "data": {
+          "firmware_type": "Build type"
+        }
       }
     },
     "error": {
       "cannot_connect": "Could not read or update the controller configuration.",
       "invalid_network": "Check that the static gateway is in the same subnet as the controller IP.",
-      "password_required": "Enter an API password before enabling protection."
+      "password_required": "Enter an API password before enabling protection.",
+      "firmware_api_unavailable": "Could not load firmware choices from the version API. Check the controller's OTA catalog URL and server availability."
     }
   }
 }

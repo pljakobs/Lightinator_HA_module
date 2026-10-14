@@ -34,6 +34,8 @@ PLATFORMS = ["light", "button", "sensor", "select", "update"]
 CONF_CHIP_ID = "chip_id"
 CONF_DEVICE_NAME = "device_name"
 CONF_GROUP_AREA_MAP = "group_area_map"
+CONF_FIRMWARE_BRANCH = "firmware_branch"
+CONF_FIRMWARE_TYPE = "firmware_type"
 
 
 def configured_color_temperature_range(config: dict) -> tuple[int, int]:
