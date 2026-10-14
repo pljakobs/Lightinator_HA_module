@@ -11,8 +11,14 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 
-from .const import CONF_DEVICE_NAME, DOMAIN
+from .const import (
+    CONF_DEVICE_NAME,
+    CONF_FIRMWARE_BRANCH,
+    CONF_FIRMWARE_TYPE,
+    DOMAIN,
+)
 from .coordinator import LightinatorCoordinator
+from .firmware_api import FirmwareVersionApi, firmware_branch_from_version
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_COLOR_MODELS = ["RGB", "RGBWW", "RGBCW", "RGBWWCW"]
@@ -31,6 +37,7 @@ class LightinatorOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
+        self._firmware_branch = ""
 
     def _coordinator(self) -> LightinatorCoordinator:
         return self.hass.data[DOMAIN][self._entry.entry_id]
@@ -42,7 +49,127 @@ class LightinatorOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         return self.async_show_menu(
-            step_id="init", menu_options=["color", "network"]
+            step_id="init", menu_options=["color", "network", "firmware"]
+        )
+
+    def _firmware_api(self, config: dict[str, Any]) -> FirmwareVersionApi:
+        ota = config.get("ota", {})
+        catalog_url = ota.get("url", "") if isinstance(ota, dict) else ""
+        if not catalog_url:
+            raise ValueError("The controller has no firmware catalog URL")
+        return FirmwareVersionApi(
+            async_get_clientsession(self.hass), str(catalog_url)
+        )
+
+    async def async_step_firmware(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select a firmware branch from the version API."""
+        errors: dict[str, str] = {}
+        try:
+            config = await self._config()
+            info = (self._coordinator().data or {}).get("info", {})
+            device = info.get("device", {}) if isinstance(info, dict) else {}
+            app = info.get("app", {}) if isinstance(info, dict) else {}
+            device = device if isinstance(device, dict) else {}
+            app = app if isinstance(app, dict) else {}
+            soc = str(device.get("soc", "")).lower()
+            if not soc:
+                raise ValueError("Controller SoC is unavailable")
+            branches = await self._firmware_api(config).branches(soc)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Unable to load firmware branches: %s", err)
+            branches = []
+            errors["base"] = "firmware_api_unavailable"
+
+        if not branches:
+            errors.setdefault("base", "firmware_api_unavailable")
+            return self.async_show_form(
+                step_id="firmware",
+                data_schema=vol.Schema({}),
+                errors=errors,
+            )
+
+        installed = str(app.get("git_version", ""))
+        default_branch = self._entry.options.get(
+            CONF_FIRMWARE_BRANCH, firmware_branch_from_version(installed)
+        )
+        if default_branch not in branches:
+            default_branch = branches[0]
+
+        if user_input is not None:
+            self._firmware_branch = user_input[CONF_FIRMWARE_BRANCH]
+            return await self.async_step_firmware_type()
+
+        return self.async_show_form(
+            step_id="firmware",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_FIRMWARE_BRANCH, default=default_branch
+                    ): vol.In(branches)
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_firmware_type(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select debug/release type and save both firmware preferences."""
+        errors: dict[str, str] = {}
+        try:
+            config = await self._config()
+            info = (self._coordinator().data or {}).get("info", {})
+            device = info.get("device", {}) if isinstance(info, dict) else {}
+            app = info.get("app", {}) if isinstance(info, dict) else {}
+            device = device if isinstance(device, dict) else {}
+            app = app if isinstance(app, dict) else {}
+            soc = str(device.get("soc", "")).lower()
+            if not soc or not self._firmware_branch:
+                raise ValueError("Controller firmware information is unavailable")
+            api = self._firmware_api(config)
+            build_types = await api.types(soc, self._firmware_branch)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Unable to load firmware build types: %s", err)
+            build_types = []
+            errors["base"] = "firmware_api_unavailable"
+
+        if not build_types:
+            errors.setdefault("base", "firmware_api_unavailable")
+            return self.async_show_form(
+                step_id="firmware_type",
+                data_schema=vol.Schema({}),
+                errors=errors,
+            )
+
+        installed_type = str(app.get("build_type", "")).lower()
+        default_type = self._entry.options.get(CONF_FIRMWARE_TYPE, installed_type)
+        if default_type not in build_types:
+            default_type = build_types[0]
+
+        if user_input is not None:
+            new_options = dict(self._entry.options)
+            new_options[CONF_FIRMWARE_BRANCH] = self._firmware_branch
+            new_options[CONF_FIRMWARE_TYPE] = user_input[CONF_FIRMWARE_TYPE]
+            self.hass.config_entries.async_update_entry(
+                self._entry, options=new_options
+            )
+            self.hass.async_create_task(
+                self.hass.config_entries.async_reload(self._entry.entry_id)
+            )
+            return self.async_create_entry(title="", data=new_options)
+
+        return self.async_show_form(
+            step_id="firmware_type",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_FIRMWARE_TYPE, default=default_type
+                    ): vol.In(build_types)
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_color(

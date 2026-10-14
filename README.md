@@ -11,7 +11,7 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 - **Preset select** — apply saved colour presets from the device
 - **Save preset service** — save the current HSV or raw color under a preset name
 - **Controller settings** — color model, channel correction, white balance, DHCP/static addressing, MQTT, syslog, telemetry, and API security
-- **Firmware update entity** — offers a ROM compatible with the controller's SoC, build type, and branch
+- **Firmware update entity** — selects compatible ROMs through the Lightinator Version API, with branch and debug/release choices
 - **Wi-Fi services** — scan networks or connect a controller to an SSID
 - **Animation controls** — Stop, Skip, Pause, Resume buttons
 - **Diagnostic sensors** — uptime, free heap, WiFi IP
@@ -37,8 +37,10 @@ You can also add a device manually via **Settings → Devices & Services → Add
 Use the integration's **Configure** action for color and network settings. Static
 IP, netmask, gateway, and DHCP are submitted together. Some changes reboot the
 controller; its stable `/info` device ID keeps the HA device identity unchanged.
-The firmware update entity uses the controller's configured OTA catalog URL and
-offers only matching SoC/build/branch releases.
+The firmware update entity derives the Lightinator Version API URL from the
+controller's configured OTA catalog URL. Use its Firmware options to choose an
+available branch and debug or release build; available choices are filtered by
+the controller's SoC.
 
 ## Entities
 

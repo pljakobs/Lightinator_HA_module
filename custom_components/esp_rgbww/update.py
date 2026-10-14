@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urljoin
@@ -20,8 +19,19 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN
+from .const import (
+    CONF_CHIP_ID,
+    CONF_DEVICE_NAME,
+    CONF_FIRMWARE_BRANCH,
+    CONF_FIRMWARE_TYPE,
+    DOMAIN,
+)
 from .coordinator import LightinatorCoordinator
+from .firmware_api import (
+    FirmwareVersionApi,
+    firmware_branch_from_version,
+    firmware_version_key,
+)
 
 _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(hours=12)
@@ -41,7 +51,7 @@ async def async_setup_entry(
 class LightinatorFirmwareUpdate(
     CoordinatorEntity[LightinatorCoordinator], UpdateEntity
 ):
-    """Offer a ROM release matching the controller's SoC/build/branch."""
+    """Offer a ROM selected by SoC, configured branch, and build type."""
 
     _attr_has_entity_name = True
     _attr_name = "Firmware"
@@ -72,7 +82,7 @@ class LightinatorFirmwareUpdate(
         self._ota_message = ""
 
     async def async_update(self) -> None:
-        """Fetch the configured release catalog and select a compatible ROM."""
+        """Fetch compatible firmware from the Lightinator version API."""
         try:
             config = await self.coordinator.async_get_config()
             ota = config.get("ota", {})
@@ -81,59 +91,46 @@ class LightinatorFirmwareUpdate(
                 self._candidate = None
                 return
 
-            async with self._session.get(
-                self._ota_url, timeout=aiohttp.ClientTimeout(total=20)
-            ) as response:
-                response.raise_for_status()
-                catalog = await response.json()
+            info = (self.coordinator.data or {}).get("info", {})
+            device = info.get("device", {}) if isinstance(info, dict) else {}
+            app = info.get("app", {}) if isinstance(info, dict) else {}
+            device = device if isinstance(device, dict) else {}
+            app = app if isinstance(app, dict) else {}
+            soc = str(device.get("soc", "")).lower()
+            installed = str(app.get("git_version", ""))
+            installed_branch = firmware_branch_from_version(installed)
+            branch = str(
+                self._entry.options.get(CONF_FIRMWARE_BRANCH, installed_branch)
+            ).lower()
+            installed_type = str(app.get("build_type", "")).lower()
+            build_type = str(
+                self._entry.options.get(CONF_FIRMWARE_TYPE, installed_type)
+            ).lower()
+            if not soc or not branch or not build_type:
+                self._candidate = None
+                return
+
+            candidates = await FirmwareVersionApi(
+                self._session, str(self._ota_url)
+            ).versions(soc, branch, build_type)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-            _LOGGER.debug("Unable to fetch firmware catalog: %s", err)
+            _LOGGER.debug("Unable to fetch firmware API versions: %s", err)
             self._candidate = None
             return
-
-        info = (self.coordinator.data or {}).get("info", {})
-        device = info.get("device", {}) if isinstance(info, dict) else {}
-        app = info.get("app", {}) if isinstance(info, dict) else {}
-        device = device if isinstance(device, dict) else {}
-        app = app if isinstance(app, dict) else {}
-        soc = str(device.get("soc", "")).lower()
-        build_type = str(app.get("build_type", "")).lower()
-        installed = str(app.get("git_version", ""))
-        branch = self._branch_from_version(installed)
-
-        candidates: list[dict[str, Any]] = []
-        if isinstance(catalog, dict):
-            for key in ("firmware", "history"):
-                items = catalog.get(key, [])
-                if isinstance(items, list):
-                    candidates.extend(item for item in items if isinstance(item, dict))
 
         compatible = [
             item
             for item in candidates
-            if str(item.get("soc", "")).lower() == soc
-            and str(item.get("type", "")).lower() == build_type
-            and str(item.get("branch") or "stable").lower() == branch
-            and isinstance(item.get("files"), dict)
-            and isinstance(item["files"].get("rom"), dict)
-            and isinstance(item["files"]["rom"].get("url"), str)
+            if isinstance(item.get("version"), str)
+            and isinstance(item.get("url"), str)
         ]
         self._candidate = max(
             compatible,
-            key=lambda item: self._version_key(
+            key=lambda item: firmware_version_key(
                 str(item.get("fw_version") or item.get("version") or "")
             ),
             default=None,
         )
-
-    @staticmethod
-    def _branch_from_version(version: str) -> str:
-        parts = version.split("-")
-        return parts[-1].lower() if len(parts) > 2 else "stable"
-
-    @staticmethod
-    def _version_key(version: str) -> tuple[int, ...]:
-        return tuple(int(part) for part in re.findall(r"\d+", version)) or (0,)
 
     @property
     def installed_version(self) -> str | None:
@@ -144,8 +141,38 @@ class LightinatorFirmwareUpdate(
     def latest_version(self) -> str | None:
         if self._candidate is None:
             return None
-        version = self._candidate.get("fw_version") or self._candidate.get("version")
-        return str(version) if version else None
+        version = self._candidate.get("version")
+        if not isinstance(version, str) or not version:
+            return None
+
+        app = ((self.coordinator.data or {}).get("info") or {}).get("app", {})
+        installed = self.installed_version or ""
+        installed_branch = firmware_branch_from_version(installed)
+        installed_type = str(app.get("build_type", "")).lower()
+        candidate_branch = str(self._candidate.get("branch", "")).lower()
+        candidate_type = str(self._candidate.get("type", "")).lower()
+        if candidate_branch != installed_branch or candidate_type != installed_type:
+            return f"{version} ({candidate_branch}/{candidate_type})"
+        return version
+
+    @property
+    def has_update(self) -> bool:
+        """Compare build numbers and allow selected branch/type changes."""
+        installed = self.installed_version
+        if not installed or self._candidate is None:
+            return False
+
+        app = ((self.coordinator.data or {}).get("info") or {}).get("app", {})
+        installed_type = str(app.get("build_type", "")).lower()
+        installed_branch = firmware_branch_from_version(installed)
+        selected_branch = str(self._candidate.get("branch", "")).lower()
+        selected_type = str(self._candidate.get("type", "")).lower()
+        if selected_branch != installed_branch or selected_type != installed_type:
+            return True
+        candidate_version = str(self._candidate.get("version", ""))
+        return firmware_version_key(candidate_version) > firmware_version_key(
+            installed
+        )
 
     @property
     def release_summary(self) -> str | None:
@@ -158,8 +185,7 @@ class LightinatorFirmwareUpdate(
     def release_url(self) -> str | None:
         if self._candidate is None:
             return None
-        rom = self._candidate.get("files", {}).get("rom", {})
-        relative_url = rom.get("url") if isinstance(rom, dict) else None
+        relative_url = self._candidate.get("url")
         if not isinstance(relative_url, str) or not self._ota_url:
             return None
         return urljoin(self._ota_url, relative_url)
@@ -179,7 +205,11 @@ class LightinatorFirmwareUpdate(
         del backup  # Firmware OTA manages its own flash/reboot lifecycle.
         if self._candidate is None or self.latest_version is None:
             raise RuntimeError("No compatible firmware release is available")
-        if version is not None and version != self.latest_version:
+        candidate_version = str(self._candidate.get("version", ""))
+        if version is not None and version not in {
+            candidate_version,
+            self.latest_version,
+        }:
             raise RuntimeError("The requested firmware version is no longer selected")
 
         self._in_progress = True
