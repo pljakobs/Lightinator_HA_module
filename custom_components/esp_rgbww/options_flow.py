@@ -10,6 +10,7 @@ import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_DEVICE_NAME,
