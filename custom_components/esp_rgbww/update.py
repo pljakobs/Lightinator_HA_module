@@ -155,23 +155,24 @@ class LightinatorFirmwareUpdate(
             return f"{version} ({candidate_branch}/{candidate_type})"
         return version
 
-    @property
-    def has_update(self) -> bool:
-        """Compare build numbers and allow selected branch/type changes."""
-        installed = self.installed_version
-        if not installed or self._candidate is None:
-            return False
+    def version_is_newer(
+        self, latest_version: str, installed_version: str
+    ) -> bool:
+        """Compare firmware build numbers, including selected branch/type changes."""
+        if self._candidate is None:
+            return firmware_version_key(latest_version) > firmware_version_key(
+                installed_version
+            )
 
         app = ((self.coordinator.data or {}).get("info") or {}).get("app", {})
         installed_type = str(app.get("build_type", "")).lower()
-        installed_branch = firmware_branch_from_version(installed)
+        installed_branch = firmware_branch_from_version(installed_version)
         selected_branch = str(self._candidate.get("branch", "")).lower()
         selected_type = str(self._candidate.get("type", "")).lower()
         if selected_branch != installed_branch or selected_type != installed_type:
             return True
-        candidate_version = str(self._candidate.get("version", ""))
-        return firmware_version_key(candidate_version) > firmware_version_key(
-            installed
+        return firmware_version_key(latest_version) > firmware_version_key(
+            installed_version
         )
 
     @property
