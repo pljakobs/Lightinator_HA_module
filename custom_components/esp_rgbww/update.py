@@ -189,7 +189,7 @@ class LightinatorFirmwareUpdate(
         return str(summary) if summary else None
 
     @property
-    def release_url(self) -> str | None:
+    def _rom_url(self) -> str | None:
         if self._candidate is None:
             return None
         relative_url = self._candidate.get("url")
@@ -226,7 +226,7 @@ class LightinatorFirmwareUpdate(
         self._ota_message = "Firmware update started"
         self.async_write_ha_state()
         try:
-            rom_url = self.release_url
+            rom_url = self._rom_url
             if rom_url is None:
                 raise RuntimeError("The selected release has no ROM download URL")
             await self.coordinator.async_post_http(
