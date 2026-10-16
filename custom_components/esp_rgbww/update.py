@@ -241,6 +241,9 @@ class LightinatorFirmwareUpdate(
             self.async_write_ha_state()
             raise
 
+        if self._in_progress:
+            self._start_firmware_verification()
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(
