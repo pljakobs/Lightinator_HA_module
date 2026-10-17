@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import aiohttp
@@ -54,7 +55,7 @@ class LightinatorOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         return self.async_show_menu(
-            step_id="init", menu_options=["color", "network", "firmware"]
+            step_id="init", menu_options=["color", "network", "firmware", "icon"]
         )
 
     def _firmware_api(self, config: dict[str, Any]) -> FirmwareVersionApi:
@@ -158,6 +159,75 @@ class LightinatorOptionsFlow(OptionsFlow):
                             mode=SelectSelectorMode.DROPDOWN,
                         )
                     ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_icon(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select and persist an icon from the controller's local SVG sprite."""
+        coordinator = self._coordinator()
+        errors: dict[str, str] = {}
+        try:
+            icons = await coordinator.async_get_controller_icons()
+        except (aiohttp.ClientError, TimeoutError, ValueError, ET.ParseError) as err:
+            _LOGGER.debug("Unable to load controller icon sprite: %s", err)
+            icons = []
+            errors["base"] = "controller_icon_unavailable"
+
+        if not icons:
+            errors.setdefault("base", "controller_icon_unavailable")
+            return self.async_show_form(
+                step_id="icon",
+                data_schema=vol.Schema({}),
+                errors=errors,
+            )
+
+        current_icon = (coordinator.data or {}).get("controller_icon")
+        current_icon = current_icon if isinstance(current_icon, str) else ""
+        options: list[str | dict[str, str]] = [
+            {
+                "value": icon,
+                "label": icon.replace("_", " ").replace("-", " ").title(),
+            }
+            for icon in icons
+        ]
+        if current_icon and current_icon not in icons:
+            options.insert(0, {"value": current_icon, "label": "Current custom icon"})
+
+        default_icon = current_icon if current_icon else "led-strip-variant"
+        if default_icon not in {icon if isinstance(icon, str) else icon["value"] for icon in options}:
+            default_icon = icons[0]
+
+        if user_input is not None:
+            selected_icon = str(user_input["controller_icon"])
+            if selected_icon != current_icon:
+                try:
+                    await coordinator.async_update_controller_icon(selected_icon)
+                except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+                    _LOGGER.debug("Unable to save controller icon: %s", err)
+                    errors["base"] = "controller_icon_unavailable"
+                else:
+                    return self.async_create_entry(
+                        title="", data=dict(self._entry.options)
+                    )
+            else:
+                return self.async_create_entry(
+                    title="", data=dict(self._entry.options)
+                )
+
+        return self.async_show_form(
+            step_id="icon",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("controller_icon", default=default_icon): SelectSelector(
+                        SelectSelectorConfig(
+                            options=options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
                 }
             ),
             errors=errors,

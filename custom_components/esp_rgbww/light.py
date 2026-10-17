@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
-    ATTR_EFFECT,
     ATTR_HS_COLOR,
     ATTR_TRANSITION,
     ColorMode,
@@ -18,6 +18,7 @@ from homeassistant.components.light import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -31,9 +32,33 @@ from .const import (
     configured_color_temperature_range,
 )
 from .coordinator import LightinatorCoordinator
-from .presets import preset_command, preset_names
+from .presets import favorite_preset_colors
 
 _LOGGER = logging.getLogger(__name__)
+_CONTROLLER_ICON_TO_MDI = {
+    "led-strip-variant": "mdi:led-strip-variant",
+    "lights_led-strip-variant": "mdi:led-strip-variant",
+    "lightbulb": "mdi:lightbulb",
+    "lightbulb_outlined": "mdi:lightbulb-outline",
+    "lightbulb-on": "mdi:lightbulb-on",
+    "lightbulb-off": "mdi:lightbulb-off",
+    "home": "mdi:home",
+    "palette": "mdi:palette",
+    "palette_outlined": "mdi:palette-outline",
+}
+
+
+def _controller_icon_to_mdi(icon: Any) -> str | None:
+    if not isinstance(icon, str) or not icon:
+        return None
+
+    icon_name = icon
+    if icon.startswith(("http://", "https://")):
+        path_parts = urlsplit(icon).path.rstrip("/").split("/")
+        if len(path_parts) >= 3:
+            icon_name = path_parts[-3]
+
+    return _CONTROLLER_ICON_TO_MDI.get(icon_name)
 
 
 def _device_info(entry: ConfigEntry) -> DeviceInfo:
@@ -91,7 +116,7 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
     _attr_has_entity_name = True
     _attr_name = None  # device name used as entity name
     _attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
-    _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
+    _attr_supported_features = LightEntityFeature.TRANSITION
     def __init__(
         self, coordinator: LightinatorCoordinator, entry: ConfigEntry
     ) -> None:
@@ -109,6 +134,12 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
     def max_color_temp_kelvin(self) -> int:
         config = (self.coordinator.data or {}).get("config", {})
         return configured_color_temperature_range(config)[1]
+
+    @property
+    def icon(self) -> str | None:
+        return _controller_icon_to_mdi(
+            (self.coordinator.data or {}).get("controller_icon")
+        )
 
     # ------------------------------------------------------------------
     # State properties
@@ -144,66 +175,74 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
             return ColorMode.COLOR_TEMP
         return ColorMode.HS
 
-    @property
-    def effect_list(self) -> list[str] | None:
-        presets = (self.coordinator.data or {}).get("presets", [])
-        names = preset_names(presets)
-        return names or None
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._sync_firmware_favorite_colors()
 
-    @property
-    def effect(self) -> str | None:
-        # The firmware does not expose which preset is currently active
-        return None
+    def _handle_coordinator_update(self) -> None:
+        self._sync_firmware_favorite_colors()
+        super()._handle_coordinator_update()
+
+    def _sync_firmware_favorite_colors(self) -> None:
+        if not self.entity_id:
+            return
+
+        registry = er.async_get(self.hass)
+        registry_entry = registry.async_get(self.entity_id)
+        if registry_entry is None:
+            return
+
+        entity_options = dict(registry_entry.options.get("light", {}))
+        current_colors = entity_options.get("favorite_colors")
+        previous_firmware_colors = entity_options.get(
+            "_lightinator_favorite_colors"
+        )
+        if current_colors is not None and (
+            previous_firmware_colors is None
+            or current_colors != previous_firmware_colors
+        ):
+            return
+
+        coordinator_data = self.coordinator.data or {}
+        firmware_colors = favorite_preset_colors(
+            coordinator_data.get("presets", []),
+            coordinator_data.get("config", {}),
+        )
+        if (
+            current_colors == firmware_colors
+            and previous_firmware_colors == firmware_colors
+        ):
+            return
+        if not firmware_colors and previous_firmware_colors is None:
+            return
+
+        entity_options["favorite_colors"] = firmware_colors
+        entity_options["_lightinator_favorite_colors"] = firmware_colors
+        registry.async_update_entity_options(
+            self.entity_id,
+            "light",
+            entity_options,
+        )
 
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on / change colour / play preset."""
+        """Turn on or change the light color."""
         # Work from current state so unspecified fields are preserved
         hsv: dict[str, Any] = dict((self.coordinator.data or {}).get("hsv", {}))
         ramp = int(kwargs.get(ATTR_TRANSITION, 0.5) * 1000)  # ms
 
-        if ATTR_EFFECT in kwargs:
-            preset_name: str = kwargs[ATTR_EFFECT]
-            presets = (self.coordinator.data or {}).get("presets", [])
-            preset = next(
-                (
-                    p
-                    for p in presets
-                    if isinstance(p, dict) and p.get("name") == preset_name
-                ),
-                None,
-            )
-            if preset is None:
-                _LOGGER.warning("Preset '%s' not found", preset_name)
-                return
-
-            command = preset_command(
-                preset,
-                presets,
-                default_command="fade",
-                default_transition_ms=ramp,
-                transition_ms=(
-                    ramp if ATTR_TRANSITION in kwargs else None
-                )
-            )
-            if command is None:
-                _LOGGER.warning("Preset '%s' has no supported color", preset_name)
-                return
-            await self.coordinator.post("/color", command)
-            return
-        else:
-            if ATTR_BRIGHTNESS in kwargs:
-                requested = kwargs[ATTR_BRIGHTNESS]
-                hsv["v"] = max(1, round(requested * 100 / 255)) if requested > 0 else 0
-            if ATTR_HS_COLOR in kwargs:
-                hsv["h"], hsv["s"] = kwargs[ATTR_HS_COLOR]
-                hsv.pop("ct", None)
-            if ATTR_COLOR_TEMP_KELVIN in kwargs:
-                hsv["ct"] = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
-                hsv["s"] = 0
+        if ATTR_BRIGHTNESS in kwargs:
+            requested = kwargs[ATTR_BRIGHTNESS]
+            hsv["v"] = max(1, round(requested * 100 / 255)) if requested > 0 else 0
+        if ATTR_HS_COLOR in kwargs:
+            hsv["h"], hsv["s"] = kwargs[ATTR_HS_COLOR]
+            hsv.pop("ct", None)
+        if ATTR_COLOR_TEMP_KELVIN in kwargs:
+            hsv["ct"] = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
+            hsv["s"] = 0
 
         # Ensure the light actually turns on if brightness was 0
         if hsv.get("v", 0) == 0:

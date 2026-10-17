@@ -6,6 +6,7 @@ import asyncio
 import logging
 import secrets
 import time
+import xml.etree.ElementTree as ET
 from datetime import timedelta
 from typing import Any
 
@@ -15,7 +16,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, UPDATE_INTERVAL
+from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN, UPDATE_INTERVAL
 from .rpc import RpcAuthenticationError, RpcError, authentication_hash
 
 _LOGGER = logging.getLogger(__name__)
@@ -128,6 +129,67 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if resp.content_type == "application/json":
                 return await resp.json()
             return await resp.text()
+
+    async def async_get_controller_icons(self) -> list[str]:
+        """Read icon identifiers from the controller's locally served sprite."""
+        url = self._base_url() + "/icons/iconsSprite.svg"
+        async with self._session.get(
+            url, auth=self._auth(), timeout=aiohttp.ClientTimeout(total=10)
+        ) as response:
+            response.raise_for_status()
+            sprite = await response.text()
+
+        root = ET.fromstring(sprite)
+        icons = sorted(
+            {
+                symbol.get("id", "")
+                for symbol in root.iter()
+                if symbol.tag.rsplit("}", 1)[-1] == "symbol"
+                and symbol.get("id")
+            }
+        )
+        if not icons:
+            raise ValueError("The controller icon sprite has no symbols")
+        return icons
+
+    async def async_update_controller_icon(self, icon: str) -> None:
+        """Persist an icon identifier to this controller's app-data metadata."""
+        if not icon:
+            raise ValueError("Controller icon cannot be empty")
+
+        controller_id = str(self._entry.data[CONF_CHIP_ID])
+        async with self._data_lock:
+            app_data = await self._get("/data")
+            controllers = app_data.get("controllers", []) if isinstance(app_data, dict) else []
+            metadata = next(
+                (
+                    dict(item)
+                    for item in controllers
+                    if isinstance(item, dict)
+                    and str(item.get("id", "")) == controller_id
+                ),
+                None,
+            )
+            timestamp = int(time.time() * 1000)
+            if metadata is None:
+                metadata = {
+                    "id": controller_id,
+                    "name": self._entry.data.get(CONF_DEVICE_NAME, self._host),
+                    "ip-address": self._host,
+                    "ts": timestamp,
+                    "icon": icon,
+                }
+                payload = {"controllers[]": [metadata]}
+            else:
+                metadata["ts"] = timestamp
+                metadata["icon"] = icon
+                payload = {f"controllers[id={controller_id}]": metadata}
+
+            await self.async_post_http("/data", payload)
+
+        new_data = dict(self.data or {})
+        new_data["controller_icon"] = icon
+        self.async_set_updated_data(new_data)
 
     @classmethod
     def _merge_config(cls, target: dict[str, Any], update: dict[str, Any]) -> None:
@@ -427,6 +489,21 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if isinstance(data_resp, dict)
             else []
         )
+        controllers = (
+            data_resp.get("controllers", [])
+            if isinstance(data_resp, dict)
+            else []
+        )
+        controller_id = str(self._entry.data.get(CONF_CHIP_ID, ""))
+        controller_icon = next(
+            (
+                item.get("icon")
+                for item in controllers
+                if isinstance(item, dict)
+                and str(item.get("id", "")) == controller_id
+            ),
+            None,
+        )
         groups = (
             data_resp.get("groups", [])
             if isinstance(data_resp, dict)
@@ -439,6 +516,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "info": info_resp,
             "config": self._safe_config_view(config),
             "presets": presets,
+            "controller_icon": controller_icon,
             "groups": groups,
         }
 
