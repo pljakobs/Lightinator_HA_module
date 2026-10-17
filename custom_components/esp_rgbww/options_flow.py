@@ -11,6 +11,11 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     CONF_DEVICE_NAME,
@@ -38,7 +43,6 @@ class LightinatorOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
-        self._firmware_branch = ""
 
     def _coordinator(self) -> LightinatorCoordinator:
         return self.hass.data[DOMAIN][self._entry.entry_id]
@@ -65,7 +69,7 @@ class LightinatorOptionsFlow(OptionsFlow):
     async def async_step_firmware(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Select a firmware branch from the version API."""
+        """Select a firmware branch and build type from the version API."""
         errors: dict[str, str] = {}
         try:
             config = await self._config()
@@ -77,13 +81,16 @@ class LightinatorOptionsFlow(OptionsFlow):
             soc = str(device.get("soc", "")).lower()
             if not soc:
                 raise ValueError("Controller SoC is unavailable")
-            branches = await self._firmware_api(config).branches(soc)
+            api = self._firmware_api(config)
+            branches = await api.branches(soc)
+            build_types = await api.types(soc)
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-            _LOGGER.debug("Unable to load firmware branches: %s", err)
+            _LOGGER.debug("Unable to load firmware choices: %s", err)
             branches = []
+            build_types = []
             errors["base"] = "firmware_api_unavailable"
 
-        if not branches:
+        if not branches or not build_types:
             errors.setdefault("base", "firmware_api_unavailable")
             return self.async_show_form(
                 step_id="firmware",
@@ -98,9 +105,37 @@ class LightinatorOptionsFlow(OptionsFlow):
         if default_branch not in branches:
             default_branch = branches[0]
 
+        installed_type = str(app.get("build_type", "")).lower()
+        default_type = self._entry.options.get(CONF_FIRMWARE_TYPE, installed_type)
+        if default_type not in build_types:
+            default_type = build_types[0]
+
         if user_input is not None:
-            self._firmware_branch = user_input[CONF_FIRMWARE_BRANCH]
-            return await self.async_step_firmware_type()
+            selected_branch = user_input[CONF_FIRMWARE_BRANCH]
+            selected_type = user_input[CONF_FIRMWARE_TYPE]
+            if selected_branch in branches:
+                default_branch = selected_branch
+            if selected_type in build_types:
+                default_type = selected_type
+            try:
+                versions = await api.versions(soc, selected_branch, selected_type)
+            except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+                _LOGGER.debug("Unable to validate firmware selection: %s", err)
+                errors["base"] = "firmware_api_unavailable"
+            else:
+                if not versions:
+                    errors["base"] = "firmware_combination_unavailable"
+                else:
+                    new_options = dict(self._entry.options)
+                    new_options[CONF_FIRMWARE_BRANCH] = selected_branch
+                    new_options[CONF_FIRMWARE_TYPE] = selected_type
+                    self.hass.config_entries.async_update_entry(
+                        self._entry, options=new_options
+                    )
+                    self.hass.async_create_task(
+                        self.hass.config_entries.async_reload(self._entry.entry_id)
+                    )
+                    return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
             step_id="firmware",
@@ -108,66 +143,21 @@ class LightinatorOptionsFlow(OptionsFlow):
                 {
                     vol.Required(
                         CONF_FIRMWARE_BRANCH, default=default_branch
-                    ): vol.In(branches)
-                }
-            ),
-            errors=errors,
-        )
-
-    async def async_step_firmware_type(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Select debug/release type and save both firmware preferences."""
-        errors: dict[str, str] = {}
-        try:
-            config = await self._config()
-            info = (self._coordinator().data or {}).get("info", {})
-            device = info.get("device", {}) if isinstance(info, dict) else {}
-            app = info.get("app", {}) if isinstance(info, dict) else {}
-            device = device if isinstance(device, dict) else {}
-            app = app if isinstance(app, dict) else {}
-            soc = str(device.get("soc", "")).lower()
-            if not soc or not self._firmware_branch:
-                raise ValueError("Controller firmware information is unavailable")
-            api = self._firmware_api(config)
-            build_types = await api.types(soc, self._firmware_branch)
-        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-            _LOGGER.debug("Unable to load firmware build types: %s", err)
-            build_types = []
-            errors["base"] = "firmware_api_unavailable"
-
-        if not build_types:
-            errors.setdefault("base", "firmware_api_unavailable")
-            return self.async_show_form(
-                step_id="firmware_type",
-                data_schema=vol.Schema({}),
-                errors=errors,
-            )
-
-        installed_type = str(app.get("build_type", "")).lower()
-        default_type = self._entry.options.get(CONF_FIRMWARE_TYPE, installed_type)
-        if default_type not in build_types:
-            default_type = build_types[0]
-
-        if user_input is not None:
-            new_options = dict(self._entry.options)
-            new_options[CONF_FIRMWARE_BRANCH] = self._firmware_branch
-            new_options[CONF_FIRMWARE_TYPE] = user_input[CONF_FIRMWARE_TYPE]
-            self.hass.config_entries.async_update_entry(
-                self._entry, options=new_options
-            )
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self._entry.entry_id)
-            )
-            return self.async_create_entry(title="", data=new_options)
-
-        return self.async_show_form(
-            step_id="firmware_type",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_FIRMWARE_TYPE, default=default_type
-                    ): vol.In(build_types)
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=branches,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required(CONF_FIRMWARE_TYPE, default=default_type): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                {"value": item, "label": item.title()}
+                                for item in build_types
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                 }
             ),
             errors=errors,
@@ -247,9 +237,19 @@ class LightinatorOptionsFlow(OptionsFlow):
 
         schema = vol.Schema(
             {
-                vol.Required("color_model", default=selected_model): vol.In(models),
-                vol.Required("transition_mode", default=transition_mode): vol.In(
-                    _TRANSITION_MODES
+                vol.Required("color_model", default=selected_model): SelectSelector(
+                    SelectSelectorConfig(
+                        options=models,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "transition_mode", default=transition_mode
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_TRANSITION_MODES,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
                 ),
                 **{
                     vol.Required(

@@ -113,13 +113,7 @@
         "title": "Firmware updates",
         "description": "Choose the firmware branch and build type offered by the Lightinator version API.",
         "data": {
-          "firmware_branch": "Firmware branch"
-        }
-      },
-      "firmware_type": {
-        "title": "Firmware build type",
-        "description": "Choose a release or debug build available for the selected branch.",
-        "data": {
+          "firmware_branch": "Firmware branch",
           "firmware_type": "Build type"
         }
       }
@@ -128,7 +122,8 @@
       "cannot_connect": "Could not read or update the controller configuration.",
       "invalid_network": "Check that the static gateway is in the same subnet as the controller IP.",
       "password_required": "Enter an API password before enabling protection.",
-      "firmware_api_unavailable": "Could not load firmware choices from the version API. Check the controller's OTA catalog URL and server availability."
+      "firmware_api_unavailable": "Could not load firmware choices from the version API. Check the controller's OTA catalog URL and server availability.",
+      "firmware_combination_unavailable": "No firmware is available for that branch and build type combination."
     }
   }
 }

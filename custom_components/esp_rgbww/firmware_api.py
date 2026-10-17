@@ -61,10 +61,11 @@ class FirmwareVersionApi:
             raise ValueError("Invalid firmware branches response")
         return [item for item in result if isinstance(item, str)]
 
-    async def types(self, soc: str, branch: str) -> list[str]:
-        result = await self._get(
-            "/firmware/types", {"soc": soc, "branch": branch}
-        )
+    async def types(self, soc: str, branch: str | None = None) -> list[str]:
+        params = {"soc": soc}
+        if branch:
+            params["branch"] = branch
+        result = await self._get("/firmware/types", params)
         if not isinstance(result, list):
             raise ValueError("Invalid firmware types response")
         return [item for item in result if isinstance(item, str)]
