@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN
@@ -33,6 +34,7 @@ async def async_setup_entry(
             LightinatorButton(coordinator, entry, key, label, endpoint)
             for key, label, endpoint in _BUTTONS
         ]
+        + [LightinatorFirmwareCheckButton(hass, entry)]
     )
 
 
@@ -64,3 +66,36 @@ class LightinatorButton(ButtonEntity):
     async def async_press(self) -> None:
         """Send the command to the device."""
         await self._coordinator.post(self._endpoint)
+
+
+class LightinatorFirmwareCheckButton(ButtonEntity):
+    """Refresh the device's firmware update entity on demand."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Check for Updates"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._firmware_unique_id = f"{entry.data[CONF_CHIP_ID]}_firmware"
+        self._attr_unique_id = f"{entry.data[CONF_CHIP_ID]}_check_firmware"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.data[CONF_CHIP_ID])},
+            name=entry.data[CONF_DEVICE_NAME],
+            manufacturer="ESP RGBWW Firmware",
+            model="RGBWW Controller",
+            configuration_url=f"http://{entry.data[CONF_HOST]}",
+        )
+
+    async def async_press(self) -> None:
+        """Ask Home Assistant to refresh this device's firmware entity."""
+        entity_id = er.async_get(self._hass).async_get_entity_id(
+            "update", DOMAIN, self._firmware_unique_id
+        )
+        if entity_id is None:
+            return
+        await self._hass.services.async_call(
+            "homeassistant",
+            "update_entity",
+            {"entity_id": entity_id},
+            blocking=True,
+        )
