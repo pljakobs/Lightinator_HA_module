@@ -614,7 +614,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     backoff = _WS_BACKOFF_INITIAL
                     _LOGGER.debug("Lightinator WS connected to %s", ws_url)
                     await self._rpc_request(
-                        "runtime_info_subscribe", {}, wait_ready=False
+                        "subscribe", {"channel": "runtime_info"}, wait_ready=False
                     )
                     self._ws_connected = True
                     self._ws_generation += 1
