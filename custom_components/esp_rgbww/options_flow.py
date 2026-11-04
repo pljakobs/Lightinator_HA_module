@@ -21,11 +21,12 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_DEVICE_NAME,
     CONF_FIRMWARE_BRANCH,
+    CONF_FIRMWARE_RELEASE_LINE,
     CONF_FIRMWARE_TYPE,
     DOMAIN,
 )
 from .coordinator import LightinatorCoordinator
-from .firmware_api import FirmwareVersionApi, firmware_branch_from_version
+from .firmware_api import FirmwareVersionApi, firmware_selection
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_COLOR_MODELS = ["RGB", "RGBWW", "RGBCW", "RGBWWCW"]
@@ -83,8 +84,10 @@ class LightinatorOptionsFlow(OptionsFlow):
             if not soc:
                 raise ValueError("Controller SoC is unavailable")
             api = self._firmware_api(config)
-            branches = await api.branches(soc)
-            build_types = await api.types(soc)
+            combinations = await api.options(soc)
+            branches = sorted({item["stage"] for item in combinations})
+            release_lines = sorted({item["release_line"] for item in combinations}, key=lambda value: tuple(map(int, value.split("."))))
+            build_types = sorted({item["build_type"] for item in combinations})
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             _LOGGER.debug("Unable to load firmware choices: %s", err)
             branches = []
@@ -100,26 +103,37 @@ class LightinatorOptionsFlow(OptionsFlow):
             )
 
         installed = str(app.get("git_version", ""))
-        default_branch = self._entry.options.get(
-            CONF_FIRMWARE_BRANCH, firmware_branch_from_version(installed)
-        )
+        try:
+            default_line, default_branch = firmware_selection(
+                installed,
+                str(self._entry.options.get(CONF_FIRMWARE_BRANCH, "")),
+                str(self._entry.options.get(CONF_FIRMWARE_RELEASE_LINE, "")),
+            )
+        except ValueError:
+            default_line, default_branch = "", ""
+        if default_line not in release_lines:
+            default_line = ""
         if default_branch not in branches:
-            default_branch = branches[0]
+            default_branch = ""
 
         installed_type = str(app.get("build_type", "")).lower()
         default_type = self._entry.options.get(CONF_FIRMWARE_TYPE, installed_type)
         if default_type not in build_types:
-            default_type = build_types[0]
+            default_type = ""
 
         if user_input is not None:
             selected_branch = user_input[CONF_FIRMWARE_BRANCH]
+            selected_line = user_input[CONF_FIRMWARE_RELEASE_LINE]
             selected_type = user_input[CONF_FIRMWARE_TYPE]
+            default_line = selected_line
             if selected_branch in branches:
                 default_branch = selected_branch
             if selected_type in build_types:
                 default_type = selected_type
             try:
-                versions = await api.versions(soc, selected_branch, selected_type)
+                if {"release_line": selected_line, "stage": selected_branch, "build_type": selected_type} not in combinations:
+                    raise ValueError("Unavailable firmware option combination")
+                versions = await api.versions(soc, f"{selected_line}/{selected_branch}", selected_type)
             except (aiohttp.ClientError, TimeoutError, ValueError) as err:
                 _LOGGER.debug("Unable to validate firmware selection: %s", err)
                 errors["base"] = "firmware_api_unavailable"
@@ -129,6 +143,7 @@ class LightinatorOptionsFlow(OptionsFlow):
                 else:
                     new_options = dict(self._entry.options)
                     new_options[CONF_FIRMWARE_BRANCH] = selected_branch
+                    new_options[CONF_FIRMWARE_RELEASE_LINE] = selected_line
                     new_options[CONF_FIRMWARE_TYPE] = selected_type
                     self.hass.config_entries.async_update_entry(
                         self._entry, options=new_options
@@ -142,6 +157,9 @@ class LightinatorOptionsFlow(OptionsFlow):
             step_id="firmware",
             data_schema=vol.Schema(
                 {
+                    vol.Required(CONF_FIRMWARE_RELEASE_LINE, default=default_line): SelectSelector(
+                        SelectSelectorConfig(options=release_lines, mode=SelectSelectorMode.DROPDOWN)
+                    ),
                     vol.Required(
                         CONF_FIRMWARE_BRANCH, default=default_branch
                     ): SelectSelector(

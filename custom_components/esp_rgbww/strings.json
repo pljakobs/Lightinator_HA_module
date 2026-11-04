@@ -111,6 +111,7 @@
         "description": "Choose the firmware branch and build type offered by the Lightinator version API.",
         "data": {
           "firmware_branch": "Firmware branch",
+          "firmware_release_line": "Release line",
           "firmware_type": "Build type"
         }
       }

@@ -23,6 +23,7 @@ from .const import (
     CONF_CHIP_ID,
     CONF_DEVICE_NAME,
     CONF_FIRMWARE_BRANCH,
+    CONF_FIRMWARE_RELEASE_LINE,
     CONF_FIRMWARE_TYPE,
     DOMAIN,
 )
@@ -30,6 +31,7 @@ from .coordinator import LightinatorCoordinator
 from .firmware_api import (
     FirmwareVersionApi,
     firmware_branch_from_version,
+    firmware_selection,
     firmware_version_key,
 )
 
@@ -104,10 +106,12 @@ class LightinatorFirmwareUpdate(
             app = app if isinstance(app, dict) else {}
             soc = str(device.get("soc", "")).lower()
             installed = str(app.get("git_version", ""))
-            installed_branch = firmware_branch_from_version(installed)
-            branch = str(
-                self._entry.options.get(CONF_FIRMWARE_BRANCH, installed_branch)
-            ).lower()
+            selected_line, selected_stage = firmware_selection(
+                installed,
+                str(self._entry.options.get(CONF_FIRMWARE_BRANCH, "")),
+                str(self._entry.options.get(CONF_FIRMWARE_RELEASE_LINE, "")),
+            )
+            branch = f"{selected_line}/{selected_stage}"
             installed_type = str(app.get("build_type", "")).lower()
             build_type = str(
                 self._entry.options.get(CONF_FIRMWARE_TYPE, installed_type)
@@ -219,6 +223,10 @@ class LightinatorFirmwareUpdate(
         }:
             raise RuntimeError("The requested firmware version is no longer selected")
 
+        app = ((self.coordinator.data or {}).get("info") or {}).get("app", {})
+        self._candidate = await FirmwareVersionApi(self._session, self._ota_url).verify_upgrade(
+            self._candidate, self.installed_version or "", str(app.get("webapp_version", ""))
+        )
         self._ota_expected_version = candidate_version
         self._ota_expected_type = str(self._candidate.get("type", "")).lower()
         self._ota_connection_generation = self.coordinator.ws_generation
