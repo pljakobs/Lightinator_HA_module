@@ -34,6 +34,7 @@ class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):
         client._get = AsyncMock(return_value=[
             {"version": "V5.1.0-42-5.1-develop", "branch": "5.1-develop", "soc": "esp32", "type": "release"},
             {"version": "V5.0-42-develop", "branch": "develop", "soc": "esp32", "type": "release"},
+            {"version": "V5.1.0-42-5.1-develop", "branch": "5.1-develop", "soc": "esp32c3", "type": "release"},
         ])
         result = await client.versions("esp32", "5.1/develop", "release")
         self.assertEqual(len(result), 1)
@@ -63,12 +64,45 @@ class FirmwareApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await client.verify_upgrade(candidate, "V5.0-42-develop", "legacy"))["version"], candidate["version"])
         self.assertEqual(client._get.await_count, 1)
 
-    async def test_cross_line_install_requires_bridge(self):
+    async def test_cross_line_upgrade_does_not_require_a_bridge_or_transition_endpoint(self):
         client = api.FirmwareVersionApi(None, "https://example.test/version.json")
         candidate = {"id": "2", "version": "V5.1.0-43-5.1-develop", "branch": "5.1/develop", "soc": "esp32", "type": "release", "url": "https://example.test/rom.bin"}
-        client._get = AsyncMock(side_effect=[[candidate], {"status": "bridge_required", "reason": "Install bridge webapp first"}])
-        with self.assertRaisesRegex(ValueError, "Install bridge"):
-            await client.verify_upgrade(candidate, "V5.0-42-develop", "legacy")
+        client._get = AsyncMock(side_effect=[[candidate], AssertionError("Transition endpoint must not be used")])
+        refreshed = await client.verify_upgrade(candidate, "V5.0.0-1022-develop", "V5.0-412")
+        self.assertEqual(refreshed["version"], candidate["version"])
+        self.assertEqual(client._get.await_count, 1)
+
+    async def test_cross_line_upgrade_compares_lines_numerically(self):
+        client = api.FirmwareVersionApi(None, "https://example.test/version.json")
+        candidate = {"id": "3", "version": "V5.10.0-1-develop", "branch": "5.10/develop", "soc": "esp32", "type": "release", "url": "https://example.test/rom.bin"}
+        client._get = AsyncMock(return_value=[candidate])
+        self.assertEqual((await client.verify_upgrade(candidate, "V5.9.0-1-develop", ""))["version"], candidate["version"])
+
+    async def test_cross_line_downgrade_requires_configdb_review(self):
+        client = api.FirmwareVersionApi(None, "https://example.test/version.json")
+        candidate = {"id": "1", "version": "V5.0-43-develop", "branch": "5.0/develop", "soc": "esp32", "type": "release", "url": "https://example.test/rom.bin"}
+        client._get = AsyncMock(return_value=[candidate])
+        with self.assertRaisesRegex(ValueError, "ConfigDB schema compatibility review"):
+            await client.verify_upgrade(candidate, "V5.1.0-1-develop", "")
+        self.assertEqual(client._get.await_count, 1)
+
+    async def test_upgrade_still_rejects_changed_artifacts(self):
+        client = api.FirmwareVersionApi(None, "https://example.test/version.json")
+        candidate = {"id": "2", "version": "V5.1.0-43-develop", "branch": "5.1/develop", "soc": "esp32", "type": "release", "url": "https://example.test/rom.bin", "sha256": "original", "size": 123}
+        for changed in ({"url": "https://example.test/replacement.bin"}, {"sha256": "changed"}, {"size": 124}):
+            with self.subTest(changed=changed):
+                client._get = AsyncMock(return_value=[{**candidate, **changed}])
+                with self.assertRaisesRegex(ValueError, "changed or is no longer available"):
+                    await client.verify_upgrade(candidate, "V5.0.0-1022-develop", "")
+
+    async def test_upgrade_still_rejects_unavailable_or_wrong_soc_artifacts(self):
+        client = api.FirmwareVersionApi(None, "https://example.test/version.json")
+        candidate = {"id": "2", "version": "V5.1.0-43-develop", "branch": "5.1/develop", "soc": "esp32", "type": "release", "url": "https://example.test/rom.bin"}
+        for records in ([], [{**candidate, "soc": "esp32c3"}]):
+            with self.subTest(records=records):
+                client._get = AsyncMock(return_value=records)
+                with self.assertRaisesRegex(ValueError, "changed or is no longer available"):
+                    await client.verify_upgrade(candidate, "V5.0.0-1022-develop", "")
 
 
 if __name__ == "__main__":

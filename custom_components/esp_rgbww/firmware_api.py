@@ -171,18 +171,8 @@ class FirmwareVersionApi:
         installed_line, _ = firmware_identity(installed_version)
         if not installed_line:
             raise ValueError("Installed identity is unknown; cannot verify an upgrade path")
-        if installed_line == refreshed["release_line"]:
-            return refreshed
-        try:
-            transition = await self._get("/v2/firmware/transition", {
-                "soc": candidate["soc"], "installed_version": installed_version,
-                "target_id": str(candidate.get("id", "")), "installed_webapp_version": installed_webapp_version, "product": "controller",
-            })
-        except aiohttp.ClientResponseError as error:
-            if error.status not in {404, 405}:
-                raise
-            raise ValueError("Cross-line migration needs an upgraded server and bridge webapp; same-line updates remain available") from error
-        if not isinstance(transition, dict) or transition.get("status") != "ready":
-            reason = transition.get("reason") if isinstance(transition, dict) else None
-            raise ValueError(reason or "A verified bridge webapp is required before changing firmware line")
+        source_line = tuple(int(component) for component in installed_line.split("."))
+        target_line = tuple(int(component) for component in refreshed["release_line"].split("."))
+        if target_line < source_line:
+            raise ValueError("Cross-line downgrades require a ConfigDB schema compatibility review")
         return refreshed
