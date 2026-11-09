@@ -56,7 +56,11 @@ class LightinatorOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         return self.async_show_menu(
-            step_id="init", menu_options=["color", "network", "firmware", "icon"]
+            step_id="init", menu_options=(
+                ["network", "firmware", "icon"]
+                if self._coordinator().virtual_lights is not None
+                else ["color", "network", "firmware", "icon"]
+            )
         )
 
     def _firmware_api(self, config: dict[str, Any]) -> FirmwareVersionApi:
@@ -254,6 +258,8 @@ class LightinatorOptionsFlow(OptionsFlow):
     async def async_step_color(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        if self._coordinator().virtual_lights is not None:
+            return await self.async_step_init()
         errors: dict[str, str] = {}
         try:
             config = await self._config()

@@ -8,6 +8,11 @@ fade_sequence:
     device:
       integration: esp_rgbww
   fields:
+    light_id:
+      name: Virtual light UUID
+      description: Optional 5.1 light UUID. Omit to use the controller's default light (or the single 5.0 light).
+      selector:
+        text:
     steps:
       name: Steps
       description: >
@@ -60,6 +65,11 @@ blink:
     device:
       integration: esp_rgbww
   fields:
+    light_id:
+      name: Virtual light UUID
+      description: Optional 5.1 light UUID. Omit to use the controller's default light (or the single 5.0 light).
+      selector:
+        text:
     speed_ms:
       name: Speed
       description: Half-period of each blink cycle in milliseconds (time on or off).
@@ -94,6 +104,11 @@ save_preset:
     device:
       integration: esp_rgbww
   fields:
+    light_id:
+      name: Virtual light UUID
+      description: Optional 5.1 light UUID whose state should be saved. Omit to save the default light.
+      selector:
+        text:
     name:
       name: Preset name
       description: An existing preset with this name will be updated.

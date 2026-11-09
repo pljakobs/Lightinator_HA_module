@@ -58,7 +58,7 @@ def _register_services(hass: HomeAssistant) -> None:
             steps[-1]["r"] = True
 
         for coordinator in _get_coordinators_for_call(hass, call):
-            await coordinator.post("/color", {"cmds": steps})
+            await coordinator.post("/color", {"cmds": steps}, light_id=call.data.get("light_id"))
 
     async def handle_blink(call: ServiceCall) -> None:
         """Trigger a blink animation on the target device(s)."""
@@ -68,7 +68,7 @@ def _register_services(hass: HomeAssistant) -> None:
         if loop:
             payload["r"] = True
         for coordinator in _get_coordinators_for_call(hass, call):
-            await coordinator.post("/blink", payload)
+            await coordinator.post("/blink", payload, light_id=call.data.get("light_id"))
 
     async def handle_save_preset(call: ServiceCall) -> None:
         """Save the current controller color under a preset name."""
@@ -79,7 +79,9 @@ def _register_services(hass: HomeAssistant) -> None:
         favorite = call.data.get("favorite")
 
         for coordinator in _get_coordinators_for_call(hass, call):
-            await coordinator.save_current_preset(name, color_mode, favorite)
+            await coordinator.save_current_preset(
+                name, color_mode, favorite, light_id=call.data.get("light_id")
+            )
 
     async def handle_scan_wifi(call: ServiceCall) -> None:
         """Start a Wi-Fi scan on the selected controller(s)."""

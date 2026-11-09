@@ -8,8 +8,10 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 
 - **JSON-RPC WebSocket** for light state, commands, and runtime updates; HTTP is retained for presets/groups and cluster-host discovery, which the firmware does not expose over RPC
 - **Automatic discovery** via mDNS (Zeroconf) — no IP configuration needed
-- **Full light entity**: HS colour + colour-temperature (2703 K – 6536 K), brightness, transitions
-- **RAW channel controls**: separate brightness lights for each active RGB, warm-white, and cool-white channel, based on the controller's color model
+- **5.0 compatibility**: the existing main light, raw channels, entity identities and untargeted API remain supported
+- **5.1 virtual lights**: one primary light entity per configured firmware light, sharing one controller device and WebSocket
+- **Profile-aware controls**: brightness for SINGLE/WW/CW, brightness and color temperature for WWCW, HS for RGB, RGBW for RGBWW/RGBCW, and HS/color temperature/RGBWW for RGBWWCW
+- **RAW channel controls**: optional per-channel brightness lights (disabled by default for new 5.1 entities)
 - **Preset select** — apply saved colour presets from the device
 - **Favorite preset swatches** — show controller-favorite colors in the native Home Assistant light dialog
 - **Save preset service** — save the current HSV or raw color under a preset name
@@ -43,6 +45,8 @@ IP, netmask, gateway, and DHCP are submitted together. Some changes reboot the
 controller; its stable `/info` device ID keeps the HA device identity unchanged.
 Use **Controller icon** in Configure to choose a locally available controller
 icon; the selected sprite ID is saved to the controller's app-data.
+On 5.1, configure light types, pins and per-light calibration in the controller's
+webapp. The legacy controller-wide **Color** form is only offered on 5.0.
 The firmware update entity derives the Lightinator Version API URL from the
 controller's configured OTA catalog URL. Use its Firmware options to choose an
 available branch and debug or release build; available choices are filtered by
@@ -52,7 +56,7 @@ the controller's SoC.
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `light.<name>` | Light | Main RGBWW light (HS + colour-temp) |
+| `light.<name>` | Light | 5.0 main RGBWW light; on 5.1, one profile-aware primary entity per configured light |
 | `light.<name>_red` / `_green` / `_blue` | Light | Direct raw brightness for RGB channels when enabled by the controller's color model |
 | `light.<name>_warm_white` | Light | Warm-white channel (raw PWM) |
 | `light.<name>_cool_white` | Light | Cool-white channel (raw PWM) |
@@ -71,11 +75,60 @@ The `esp_rgbww.scan_wifi` and `esp_rgbww.connect_wifi` services start a scan and
 connect a controller to an SSID. The `esp_rgbww.save_preset` service stores the
 current HSV or raw channel state as a named controller preset.
 
+### Virtual lights (5.1)
+
+Each configured light is identified by controller chip ID plus its persistent
+firmware light UUID. Names, list order, numeric API indexes and the configured
+default may change without rebinding an entity. Before commands the configuration
+is rechecked, the UUID resolved to its current numeric index, and that index
+targeted explicitly, even if an old index has been reused. New lights are
+discovered during fallback polls; removed lights become unavailable rather than
+controlling another output. The same applies to removed raw channels.
+
+When upgrading an existing integration from 5.0, the existing main entity is
+bound **once** to the configured default light, and that UUID is saved in the
+config entry. Its old unique ID and entity ID are retained, as are matching
+existing raw-channel entities. Later default changes do not redirect them.
+If that UUID is deleted, those entities remain unavailable; a replacement UUID
+creates new entities. New installations use UUID-based identities throughout.
+
+Enable optional raw channels from the device's entity list. WWCW exposes warm
+and cool white separately; the primary entity remains a tunable-white light.
+The firmware reports either HSV or RAW, not both. Raw-channel brightness is
+unknown while the light reports HSV; the integration does not invent PWM
+readings. An indexed RAW command changes only the requested channel.
+
+The preset selector and controller animation buttons continue to act on the
+controller's **current default** light. `fade_sequence`, `blink` and
+`save_preset` accept an optional `light_id` (firmware UUID) on 5.1 for explicit
+targeting; omitting it preserves their legacy default-light behavior.
+An invalid or removed UUID raises an error and never targets the default.
+Standard HA light services, scenes and automations target individual entities.
+The firmware preset store does not support indexed RAW arrays. Saving a
+single-channel/WWCW RAW state as a controller preset therefore reports an error;
+use an HA scene instead. HSV and named RGB RAW presets retain their existing
+formats.
+
 ## Colour Temperature
 
 The firmware's `hsv.ct` value is a Kelvin temperature, not a 0–100 percentage.
 The integration sends and reads it directly. Home Assistant displays the light
 over its supported range of 2703–6536 K and handles Kelvin/mired conversion.
+On 5.1 the range comes from each light's configured warm/cool temperatures.
+HSV readback radians and 0–1 saturation/brightness are converted to degrees and
+percent before use in HA or subsequent commands. This conversion is not applied
+to the legacy 5.0 path.
+
+## Development tests
+
+With Home Assistant installed in a Python environment, run:
+
+```sh
+python -m unittest -v test_firmware_api test_virtual_lights
+```
+
+The virtual-light tests exercise discovery, profile controls, UUID migration,
+per-light command/state isolation and unchanged 5.0 setup/commands.
 
 ## License
 
