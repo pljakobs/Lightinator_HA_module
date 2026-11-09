@@ -21,6 +21,7 @@ from custom_components.esp_rgbww.light import (
     async_setup_entry,
 )
 from custom_components.esp_rgbww.options_flow import LightinatorOptionsFlow
+from custom_components.esp_rgbww.rpc import RpcError
 from custom_components.esp_rgbww.virtual_lights import (
     CHANNELS,
     CONF_LEGACY_LIGHT_ID,
@@ -352,7 +353,7 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         await self.coordinator._refresh_color_state("uuid-0")
         self.assertEqual(self.coordinator.data["light_states"], before)
 
-    async def test_events_refresh_only_indexed_light_or_all_when_unindexed(self):
+    async def test_legacy_51_events_do_not_trigger_heavy_refreshes(self):
         self.install("SINGLE", "SINGLE")
         self.coordinator._refresh_color_state = AsyncMock()
         self.coordinator.async_request_refresh = AsyncMock()
@@ -368,13 +369,212 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
                 {"method": "color_event", "params": {"light": 4, "raw": [1023]}}
             )
             await asyncio.gather(*tasks)
-            self.coordinator._refresh_color_state.assert_awaited_once_with("uuid-1")
+            self.coordinator._refresh_color_state.assert_not_awaited()
             self.coordinator.async_request_refresh.assert_not_awaited()
+            self.assertEqual(self.coordinator.data["light_states"]["uuid-1"], {"raw": [1023]})
             await self.coordinator._handle_ws_message(
                 {"method": "color_event", "params": {"hsv": {"v": 1}}}
             )
             await asyncio.gather(*tasks)
-            self.coordinator.async_request_refresh.assert_awaited_once()
+            self.coordinator.async_request_refresh.assert_not_awaited()
+
+    async def test_subscribe_multiplexes_all_lights_on_existing_rpc_connection(self):
+        self.coordinator._rpc_request.return_value = {"subscribed": True, "channel": "lights"}
+        await self.coordinator._async_subscribe_light_updates()
+        self.coordinator._rpc_request.assert_awaited_once_with(
+            "subscribe", {"channel": "lights"}, wait_ready=False
+        )
+        self.assertTrue(self.coordinator._light_updates_subscribed)
+        self.coordinator._session.ws_connect.assert_not_called()
+
+    async def test_legacy_subscription_rejection_is_supported_but_auth_errors_surface(self):
+        for code in (-32601, -32602):
+            self.coordinator._rpc_request.side_effect = RpcError(code, "not supported")
+            await self.coordinator._async_subscribe_light_updates()
+            self.assertFalse(self.coordinator._light_updates_subscribed)
+        self.coordinator._rpc_request.side_effect = RpcError(-32001, "auth failed")
+        with self.assertRaises(RpcError):
+            await self.coordinator._async_subscribe_light_updates()
+
+    async def test_subscribed_command_is_one_guarded_rpc_without_http_or_immediate_read(self):
+        self.install("SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        self.coordinator._rpc_request.return_value = {"success": True}
+        await self.entity().async_turn_on(brightness=255)
+        self.coordinator._get.assert_not_awaited()
+        self.coordinator._rpc_request.assert_awaited_once_with(
+            "color", {"cmd": "fade", "t": 500, "raw": [1023],
+                      "light": 3, "light_id": "uuid-0"}
+        )
+        self.assertEqual(self.entity().brightness, 255)
+        await self.coordinator.async_disconnect_ws()
+
+    async def test_subscribed_events_update_non_default_light_without_requesting_data(self):
+        self.install("SINGLE", "SINGLE")
+        first = copy.deepcopy(self.coordinator.data["light_states"]["uuid-0"])
+        await self.coordinator._handle_ws_message({
+            "method": "light_state",
+            "params": {"light": 4, "light_id": "uuid-1", "state": {"raw": [789]}},
+        })
+        self.assertEqual(self.coordinator.data["light_states"]["uuid-1"], {"raw": [789]})
+        self.assertEqual(self.coordinator.data["light_states"]["uuid-0"], first)
+        self.coordinator._rpc_request.assert_not_awaited()
+        self.coordinator._get.assert_not_awaited()
+
+    async def test_config_notification_refreshes_discovery_even_with_heartbeats(self):
+        self.install("SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        self.coordinator.async_request_refresh = AsyncMock()
+        tasks = []
+
+        def create_task(coroutine):
+            task = asyncio.create_task(coroutine)
+            tasks.append(task)
+            return task
+
+        with patch.object(self.hass, "async_create_task", side_effect=create_task):
+            await self.coordinator._handle_ws_message(
+                {"method": "lights_changed", "params": {"revision": 42}}
+            )
+            await asyncio.gather(*tasks)
+        self.coordinator.async_request_refresh.assert_awaited_once()
+        self.assertTrue(self.coordinator._light_configuration_pending)
+        self.coordinator._get.side_effect = [configuration("SINGLE", "WWCW"), {}]
+        self.coordinator._rpc_request.side_effect = [
+            {"app": {"git_version": "V5.1.0"}}, {"raw": [0]}, {"raw": [0, 0]},
+        ]
+        self.coordinator.data = await self.coordinator._async_update_data()
+        self.assertEqual(len(self.coordinator.virtual_lights), 2)
+        self.assertFalse(self.coordinator._light_configuration_pending)
+        self.assertEqual(self.coordinator.update_interval.total_seconds(), 30)
+
+    async def test_transition_does_not_read_or_apply_intermediate_state(self):
+        self.install("SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        self.coordinator._rpc_request.return_value = {"success": True}
+        await self.entity().async_turn_on(brightness=255)
+        await self.coordinator._handle_ws_message({
+            "method": "light_state",
+            "params": {"light": 3, "light_id": "uuid-0", "state": {"raw": [123]}},
+        })
+        self.assertEqual(self.entity().brightness, 255)
+        await self.coordinator._refresh_color_state("uuid-0")
+        self.assertEqual(self.coordinator._rpc_request.await_count, 1)
+        self.coordinator._light_transition_until["uuid-0"] = 0
+        self.coordinator._rpc_request.return_value = {"raw": [1023]}
+        await self.coordinator._refresh_color_state("uuid-0")
+        self.assertEqual(self.entity().brightness, 255)
+        await self.coordinator.async_disconnect_ws()
+
+    async def test_old_inflight_read_cannot_overwrite_newer_command_ack(self):
+        self.install("SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def rpc(method, params):
+            if "cmd" in params:
+                return {"success": True}
+            started.set()
+            await finish.wait()
+            return {"raw": [123]}
+
+        self.coordinator._rpc_request.side_effect = rpc
+        read = asyncio.create_task(self.coordinator._refresh_color_state("uuid-0"))
+        await started.wait()
+        await self.entity().async_turn_on(brightness=255)
+        finish.set()
+        await read
+        self.assertEqual(self.entity().brightness, 255)
+        await self.coordinator.async_disconnect_ws()
+
+    async def test_multilight_poll_preserves_command_to_already_read_light(self):
+        lights = self.install("SINGLE", "SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        reading_second = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def rpc(method, params):
+            if "cmd" in params:
+                return {"success": True}
+            if params["light"] == 4:
+                reading_second.set()
+                await finish.wait()
+            return {"raw": [123]}
+
+        self.coordinator._rpc_request.side_effect = rpc
+        poll = asyncio.create_task(self.coordinator._read_virtual_light_states(lights))
+        await reading_second.wait()
+        await self.entity().async_turn_on(brightness=255, transition=0)
+        finish.set()
+        states = await poll
+        self.assertEqual(states["uuid-0"], {"raw": [1023]})
+        self.assertEqual(states["uuid-1"], {"raw": [123]})
+        await self.coordinator.async_disconnect_ws()
+
+    async def test_metadata_poll_preserves_command_while_fetching_presets(self):
+        self.install("SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        reading_data = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def get(path):
+            if path == "/config":
+                return configuration("SINGLE")
+            self.assertEqual(path, "/data")
+            reading_data.set()
+            await finish.wait()
+            return {}
+
+        async def rpc(method, params):
+            if method == "info":
+                return {"app": {"git_version": "V5.1.0"}}
+            return {"success": True} if "cmd" in params else {"raw": [123]}
+
+        self.coordinator._get.side_effect = get
+        self.coordinator._rpc_request.side_effect = rpc
+        poll = asyncio.create_task(self.coordinator._async_update_data())
+        await reading_data.wait()
+        await self.entity().async_turn_on(brightness=255, transition=0)
+        finish.set()
+        data = await poll
+        self.assertEqual(data["light_states"]["uuid-0"], {"raw": [1023]})
+        self.assertEqual(data["raw"], [1023])
+        await self.coordinator.async_disconnect_ws()
+
+    async def test_malformed_light_notification_does_not_break_socket_reader(self):
+        self.install("SINGLE")
+        previous = self.coordinator.data
+        for light_id, index in (({}, 3), ([], 3), ("uuid-0", True)):
+            with self.assertLogs("custom_components.esp_rgbww.coordinator", level="WARNING"):
+                await self.coordinator._handle_ws_message({
+                    "method": "light_state",
+                    "params": {"light_id": light_id, "light": index, "state": {"raw": [123]}},
+                })
+        self.assertIs(self.coordinator.data, previous)
+
+    async def test_reconciliation_logs_invalid_color_response(self):
+        self.install("SINGLE")
+        self.coordinator._rpc_request.return_value = {"success": True}
+        with self.assertLogs("custom_components.esp_rgbww.coordinator", level="WARNING"):
+            await self.coordinator._refresh_color_state("uuid-0")
+
+    async def test_reconciliation_waits_for_transition_and_is_cancelled_on_unload(self):
+        self.install("SINGLE")
+        self.coordinator._light_updates_subscribed = True
+        self.coordinator._rpc_request.return_value = {"success": True}
+        cancel = MagicMock()
+        with patch("custom_components.esp_rgbww.coordinator.async_call_later",
+                   return_value=cancel) as later:
+            await self.entity().async_turn_on(brightness=255, transition=2)
+            self.assertAlmostEqual(later.call_args.args[1], 2.1)
+            self.coordinator._light_transition_until["uuid-0"] = 0
+            self.coordinator._rpc_request.return_value = {"raw": [1023]}
+            await later.call_args.args[2](None)
+            self.assertEqual(self.coordinator._rpc_request.await_count, 2)
+            await self.entity().async_turn_off()
+            await self.coordinator.async_disconnect_ws()
+            cancel.assert_called()
 
     async def test_runtime_update_does_not_replace_virtual_light_state(self):
         lights = self.install("WWCW", "SINGLE")
@@ -385,6 +585,58 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.coordinator.data["lights"], lights)
         self.assertIs(self.coordinator.data["light_states"], states)
         self.assertEqual(self.coordinator.data["runtime"]["uptime"], 120)
+
+    async def test_heartbeats_do_not_postpone_discovery_poll(self):
+        self.install("SINGLE")
+        self.coordinator._listeners[0] = (MagicMock(), None)
+        with patch.object(self.coordinator, "_schedule_refresh") as schedule:
+            for uptime in (10, 20, 30, 40):
+                await self.coordinator._handle_ws_message(
+                    {"method": "runtime_info", "params": {"uptime": uptime}}
+                )
+        schedule.assert_not_called()
+
+    async def test_command_ack_keeps_target_instead_of_reading_mid_fade(self):
+        self.install("SINGLE")
+        self.coordinator._rpc_request.return_value = {"success": True}
+        await self.entity().async_turn_on(brightness=255)
+        self.coordinator._rpc_request.assert_awaited_once_with(
+            "color", {"cmd": "fade", "t": 500, "raw": [1023], "light": 3}
+        )
+        self.assertEqual(self.coordinator.data["light_states"]["uuid-0"], {"raw": [1023]})
+
+    def test_partial_raw_ack_preserves_unchanged_channels(self):
+        lights = self.install("RGB")
+        state = self.coordinator._command_state(
+            lights["uuid-0"], {"raw": {"r": 1, "g": 2, "b": 3}},
+            {"raw": {"r": 1023, "g": None}},
+        )
+        self.assertEqual(state, {"raw": {"r": 1023, "g": 2, "b": 3}})
+        lights = self.install("WWCW")
+        state = self.coordinator._command_state(
+            lights["uuid-0"], {"raw": [1, 2]}, {"raw": [1023]},
+        )
+        self.assertEqual(state, {"raw": [1023, 2]})
+
+    def test_partial_raw_ack_does_not_invent_unknown_channels(self):
+        for profile, raw in (("RGB", {"r": 1023}), ("WWCW", [1023])):
+            lights = self.install(profile)
+            self.assertIsNone(self.coordinator._command_state(
+                lights["uuid-0"], {"hsv": {"v": 50}}, {"raw": raw},
+            ))
+
+    async def test_external_light_changes_are_polled_without_exporting_config_each_tick(self):
+        self.coordinator._get.side_effect = [configuration("SINGLE", "SINGLE"), {}]
+        self.coordinator._rpc_request.side_effect = [
+            {"app": {"git_version": "V5.1.0"}}, {"raw": [0]}, {"raw": [0]},
+            {"raw": [123]}, {"raw": [789]},
+        ]
+        self.coordinator.data = await self.coordinator._async_update_data()
+        self.coordinator._get.reset_mock()
+        self.coordinator.data = await self.coordinator._async_update_data()
+        self.coordinator._get.assert_not_awaited()
+        self.assertEqual(self.coordinator.data["light_states"]["uuid-1"], {"raw": [789]})
+        self.assertLessEqual(self.coordinator.update_interval.total_seconds(), 1)
 
     async def test_50_color_event_and_refresh_still_use_legacy_state(self):
         self.coordinator.data = {"hsv": {"v": 20}, "raw": {}}

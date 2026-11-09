@@ -79,11 +79,23 @@ current HSV or raw channel state as a named controller preset.
 
 Each configured light is identified by controller chip ID plus its persistent
 firmware light UUID. Names, list order, numeric API indexes and the configured
-default may change without rebinding an entity. Before commands the configuration
-is rechecked, the UUID resolved to its current numeric index, and that index
-targeted explicitly, even if an old index has been reused. New lights are
-discovered during fallback polls; removed lights become unavailable rather than
-controlling another output. The same applies to removed raw channels.
+default may change without rebinding an entity. A single authenticated WebSocket
+per controller subscribes to both runtime and light updates. On firmware with
+the `lights` channel, UUID-tagged state notifications update all lights,
+including non-default outputs. Configuration-change notifications trigger
+discovery; a 30-second fallback refresh is retained and cannot be postponed by
+runtime heartbeats. Removed lights/channels become unavailable.
+
+On that firmware, commands send both the current index and a UUID guard checked
+by the controller, avoiding a `/config` download per slider movement. HA publishes
+the acknowledged target, ignores intermediate transition readbacks, and
+reconciles once after the fade completes. In-flight older reads cannot overwrite
+a newer command.
+
+Older 5.1 firmware without this subscription uses lightweight one-second color
+polls, a separate 30-second metadata deadline, and the per-command configuration
+check needed to avoid reused-index misrouting. These firmware limitations do
+not change the 5.0 entity or command path.
 
 When upgrading an existing integration from 5.0, the existing main entity is
 bound **once** to the configured default light, and that UUID is saved in the

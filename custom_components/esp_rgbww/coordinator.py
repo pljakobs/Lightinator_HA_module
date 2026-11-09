@@ -8,12 +8,13 @@ import secrets
 import time
 import xml.etree.ElementTree as ET
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN, UPDATE_INTERVAL
@@ -24,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _WS_BACKOFF_INITIAL = 2   # seconds
 _WS_BACKOFF_MAX = 60      # seconds
+_LIGHT_POLL_INTERVAL = 1  # 5.1 firmware only pushes the default light
 
 
 class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -64,6 +66,12 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._authenticated = False
         self._data_lock = asyncio.Lock()
         self._config_lock = asyncio.Lock()
+        self._next_metadata_refresh = 0.0
+        self._light_command_versions: dict[str, int] = {}
+        self._light_transition_until: dict[str, float] = {}
+        self._light_updates_subscribed = False
+        self._light_configuration_pending = False
+        self._light_refresh_unsubs: dict[str, Callable[[], None]] = {}
         self._config: dict[str, Any] | None = None
         self._config_lock = asyncio.Lock()
 
@@ -246,6 +254,11 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Public API used by entities
     # ------------------------------------------------------------------
 
+    def _publish_partial_data(self, data: dict[str, Any]) -> None:
+        """A heartbeat/color push must not postpone discovery or clear errors."""
+        self.data = data
+        self.async_update_listeners()
+
     @property
     def virtual_lights(self) -> dict[str, VirtualLight] | None:
         """None denotes the unchanged 5.0 single-light interface."""
@@ -263,6 +276,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous = self.virtual_lights
         if previous is None:
             raise ValueError("This controller does not expose virtual lights")
+        if self._light_updates_subscribed and not self._light_configuration_pending:
+            return self.light(light_id)
         config = await self.async_get_config(force_refresh=True)
         lights = discover_lights(config, "5.1")
         if lights is None:
@@ -282,7 +297,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hsv=default_state.get("hsv", {}), raw=default_state.get("raw", {}),
                 config=self._safe_config_view(config),
             )
-            self.async_set_updated_data(data)
+            self._publish_partial_data(data)
         return self.light(light_id)
 
     async def async_light_command(
@@ -290,11 +305,123 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Send an explicitly indexed color command and refresh that UUID."""
         previous = self.light(light_id)
-        light = await self._async_resolve_light(light_id)
-        if light.type != previous.type:
-            raise ValueError("The virtual-light profile changed; retry with its new controls")
-        await self._rpc_request("color", {**payload, "light": light.index})
-        await self._refresh_color_state(light_id)
+        version = self._light_command_versions.get(light_id, 0) + 1
+        self._light_command_versions[light_id] = version
+        self._light_transition_until[light_id] = float("inf")
+        acknowledged = False
+        try:
+            light = await self._async_resolve_light(light_id)
+            if light.type != previous.type:
+                raise ValueError("The virtual-light profile changed; retry with its new controls")
+            params = {**payload, "light": light.index}
+            if self._light_updates_subscribed:
+                params["light_id"] = light_id
+            await self._rpc_request("color", params)
+            if self._light_command_versions[light_id] != version:
+                return
+            self._light_transition_until[light_id] = (
+                time.monotonic() + payload.get("t", 0) / 1000
+            )
+            acknowledged = True
+            current = (self.data or {}).get("light_states", {}).get(light_id, {})
+            state = self._command_state(light, current, payload)
+            if state is not None:
+                self._publish_light_state(light, state)
+            self._schedule_light_reconciliation(light_id, version, payload.get("t", 0) / 1000)
+        finally:
+            if not acknowledged and self._light_command_versions.get(light_id) == version:
+                self._light_transition_until.pop(light_id, None)
+
+    def _schedule_light_reconciliation(self, light_id: str, version: int, delay: float) -> None:
+        cancel = self._light_refresh_unsubs.pop(light_id, None)
+        if cancel is not None:
+            cancel()
+
+        async def reconcile(_now: Any) -> None:
+            self._light_refresh_unsubs.pop(light_id, None)
+            if self._light_command_versions.get(light_id) == version:
+                await self._refresh_color_state(light_id)
+
+        self._light_refresh_unsubs[light_id] = async_call_later(
+            self.hass, delay + 0.1, reconcile
+        )
+
+    @staticmethod
+    def _command_state(
+        light: VirtualLight, current: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Publish acknowledged absolute targets, without inventing unknown RAW."""
+        hsv = payload.get("hsv")
+        if isinstance(hsv, dict):
+            return {"hsv": {**current.get("hsv", {}), **hsv}}
+        raw = payload.get("raw")
+        previous = current.get("raw")
+        if isinstance(raw, dict):
+            channels = dict(previous) if isinstance(previous, dict) else {}
+            channels.update({key: value for key, value in raw.items() if value is not None})
+            if any(channel not in channels for channel in light.channels):
+                return None
+            return {"raw": channels}
+        if isinstance(raw, list):
+            values = []
+            for index in range(len(light.channels)):
+                value = raw[index] if index < len(raw) else None
+                if value is None:
+                    if not isinstance(previous, list) or index >= len(previous):
+                        return None
+                    value = previous[index]
+                values.append(value)
+            return {"raw": values}
+        return None
+
+    def _publish_light_state(self, light: VirtualLight, state: dict[str, Any]) -> None:
+        data = dict(self.data or {})
+        data["light_states"] = {**data.get("light_states", {}), light.id: state}
+        if light.is_default:
+            data["hsv"] = state.get("hsv", {})
+            data["raw"] = state.get("raw", {})
+        self._publish_partial_data(data)
+
+    def _light_is_transitioning(self, light_id: str) -> bool:
+        return time.monotonic() < self._light_transition_until.get(light_id, 0)
+
+    async def _read_virtual_light_states(
+        self, lights: dict[str, VirtualLight]
+    ) -> dict[str, Any]:
+        """Read current outputs without interrupting an acknowledged transition."""
+        states = {}
+        versions = dict(self._light_command_versions)
+        for light_id, light in lights.items():
+            before = (self.virtual_lights or {}).get(light_id)
+            version = self._light_command_versions.get(light_id, 0)
+            state = None
+            if not self._light_is_transitioning(light_id):
+                color = await self._rpc_request("color", {"light": light.index})
+                if (
+                    version == self._light_command_versions.get(light_id, 0)
+                    and not self._light_is_transitioning(light_id)
+                    and before == (self.virtual_lights or {}).get(light_id)
+                ):
+                    state = decode_color(color)
+            if state is None and before == light:
+                state = (self.data or {}).get("light_states", {}).get(light_id)
+            if state is not None:
+                states[light_id] = state
+        return self._preserve_newer_targets(states, lights, versions)
+
+    def _preserve_newer_targets(
+        self, states: dict[str, Any], lights: dict[str, VirtualLight],
+        versions: dict[str, int],
+    ) -> dict[str, Any]:
+        for light_id, light in lights.items():
+            if (
+                versions.get(light_id, 0) != self._light_command_versions.get(light_id, 0)
+                or self._light_is_transitioning(light_id)
+            ):
+                current = (self.data or {}).get("light_states", {}).get(light_id)
+                if current is not None and (self.virtual_lights or {}).get(light_id) == light:
+                    states[light_id] = current
+        return states
 
     async def post(
         self, path: str, payload: dict | None = None, *, light_id: str | None = None
@@ -317,6 +444,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if light_id is not None:
             index = (await self._async_resolve_light(light_id)).index
             params["light"] = index
+            if self._light_updates_subscribed:
+                params["light_id"] = light_id
             if "cmds" in params:
                 steps = params["cmds"]
                 if not isinstance(steps, list) or any(
@@ -325,6 +454,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ):
                     raise ValueError("Sequence steps conflict with the selected virtual light")
                 params["cmds"] = [{**step, "light": index} for step in steps]
+                if self._light_updates_subscribed:
+                    params["cmds"] = [{**step, "light_id": light_id} for step in params["cmds"]]
         await self._rpc_request(method, params)
 
     async def get_json(self, path: str) -> Any:
@@ -547,6 +678,17 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch RPC state plus REST-only presets and groups."""
         try:
+            versions = dict(self._light_command_versions)
+            if self.virtual_lights is not None and time.monotonic() < self._next_metadata_refresh:
+                lights = self.virtual_lights
+                states = await self._read_virtual_light_states(lights)
+                data = dict(self.data or {})
+                default = next((light for light in lights.values() if light.is_default), None)
+                state = states.get(default.id, {}) if default else {}
+                return {
+                    **data, "light_states": states,
+                    "hsv": state.get("hsv", {}), "raw": state.get("raw", {}),
+                }
             info_resp = await self._rpc_request("info", {"sparse": "false"})
             version = info_resp.get("app", {}).get("git_version", "")
             legacy = version.lstrip("Vv").startswith("5.0")
@@ -563,11 +705,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 color_resp = await self._rpc_request("color", {})
             else:
                 color_resp = {}
-                for light_id, light in lights.items():
-                    state = decode_color(await self._rpc_request("color", {"light": light.index}))
-                    light_states[light_id] = state
-                    if light.is_default:
-                        color_resp = state
+                light_states = await self._read_virtual_light_states(lights)
             async with self._data_lock:
                 data_resp = await self._get("/data")
         except (aiohttp.ClientError, RpcError, asyncio.TimeoutError, ConnectionError, ValueError) as err:
@@ -599,6 +737,19 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else []
         )
         current = self.data or {}
+        if lights is not None:
+            light_states = self._preserve_newer_targets(light_states, lights, versions)
+            default = next((light for light in lights.values() if light.is_default), None)
+            color_resp = light_states.get(default.id, {}) if default else {}
+        self.update_interval = timedelta(
+            seconds=(
+                _LIGHT_POLL_INTERVAL
+                if lights is not None and not self._light_updates_subscribed
+                else UPDATE_INTERVAL
+            )
+        )
+        self._next_metadata_refresh = time.monotonic() + UPDATE_INTERVAL
+        self._light_configuration_pending = False
         return {
             "hsv": color_resp.get("hsv", current.get("hsv", {}) if lights is None else {}),
             "raw": color_resp.get("raw", current.get("raw", {}) if lights is None else {}),
@@ -707,9 +858,11 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._rpc_request(
                         "subscribe", {"channel": "runtime_info"}, wait_ready=False
                     )
+                    await self._async_subscribe_light_updates()
                     self._ws_connected = True
                     self._ws_generation += 1
                     self._ws_generation_changed.set()
+                    self._next_metadata_refresh = 0
                     self._ws_ready.set()
                     await reader
 
@@ -724,6 +877,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._ws_connected = False
                 self._ws = None
                 self._authenticated = False
+                self._light_updates_subscribed = False
                 self._fail_pending(ConnectionError("Lightinator WebSocket disconnected"))
                 if reader and not reader.done():
                     reader.cancel()
@@ -734,6 +888,24 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _WS_BACKOFF_MAX)
+
+    async def _async_subscribe_light_updates(self) -> None:
+        """Multiplex every light on the existing authenticated WebSocket."""
+        self._light_updates_subscribed = False
+        try:
+            result = await self._rpc_request(
+                "subscribe", {"channel": "lights"}, wait_ready=False
+            )
+        except RpcError as err:
+            if err.code not in {-32601, -32602}:
+                raise
+            _LOGGER.info(
+                "Controller does not support light notifications; using legacy updates"
+            )
+            return
+        if result.get("subscribed") is not True or result.get("channel") != "lights":
+            raise RpcError(None, "Invalid lights subscription response")
+        self._light_updates_subscribed = True
 
     async def _listen_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         """Dispatch JSON-RPC responses and server notifications."""
@@ -772,20 +944,52 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not isinstance(params, dict):
             return
 
-        if method == "color_event":
+        if method == "light_state":
+            light_id = params.get("light_id")
+            index = params.get("light")
+            if (
+                not isinstance(light_id, str)
+                or not isinstance(index, int)
+                or isinstance(index, bool)
+            ):
+                _LOGGER.warning("Invalid light notification identity: %s", params)
+                return
+            light = (self.virtual_lights or {}).get(light_id)
+            if light is None or light.index != index:
+                self._next_metadata_refresh = 0
+                self._light_configuration_pending = True
+                self.hass.async_create_task(self.async_request_refresh())
+                return
+            if not self._light_is_transitioning(light.id):
+                try:
+                    state = decode_color(params.get("state", {}))
+                except ValueError as err:
+                    _LOGGER.warning("Invalid light notification for %s: %s", light_id, err)
+                    return
+                self._publish_light_state(light, state)
+
+        elif method == "lights_changed":
+            self._next_metadata_refresh = 0
+            self._light_configuration_pending = True
+            self.hass.async_create_task(self.async_request_refresh())
+
+        elif method == "color_event":
             if self.virtual_lights is not None:
-                # Older 5.1 builds publish unindexed default-light events.
+                # Unindexed events identify no UUID. The lightweight poll reads
+                # every light without exporting /config and /data per event.
                 selector = params.get("light")
                 if selector is None:
-                    self.hass.async_create_task(self.async_request_refresh())
+                    return
                 else:
                     light = next(
                         (light for light in self.virtual_lights.values() if light.index == selector),
                         None,
                     )
                     if light is not None:
-                        self.hass.async_create_task(self._refresh_color_state(light.id))
+                        if not self._light_is_transitioning(light.id):
+                            self._publish_light_state(light, decode_color(params))
                     else:
+                        self._next_metadata_refresh = 0
                         self.hass.async_create_task(self.async_request_refresh())
                 return
             new_data = dict(self.data or {})
@@ -793,7 +997,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 new_data["hsv"] = params["hsv"]
             if "raw" in params:
                 new_data["raw"] = params["raw"]
-            self.async_set_updated_data(new_data)
+            self._publish_partial_data(new_data)
             self.hass.async_create_task(self._refresh_color_state())
 
         elif method == "runtime_info":
@@ -802,7 +1006,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             info = dict(new_data.get("info", {}))
             info["runtime"] = params
             new_data["info"] = info
-            self.async_set_updated_data(new_data)
+            self._publish_partial_data(new_data)
 
         elif method == "transition_finished":
             self.hass.bus.async_fire(
@@ -833,6 +1037,9 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.warning("Cannot refresh removed virtual light %s", light_id)
                 return
             light = self.light(light_id) if light_id is not None else None
+            version = self._light_command_versions.get(light_id, 0) if light_id is not None else 0
+            if light_id is not None and self._light_is_transitioning(light_id):
+                return
             color = await self._rpc_request("color", {"light": light.index} if light else {})
         except (
             aiohttp.ClientError,
@@ -845,22 +1052,29 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         new_data = dict(self.data or {})
         if light is not None:
             current_light = (self.virtual_lights or {}).get(light.id)
-            if current_light != light:
+            if (
+                current_light != light
+                or version != self._light_command_versions.get(light_id, 0)
+                or self._light_is_transitioning(light.id)
+            ):
                 return
-            state = decode_color(color)
-            new_data["light_states"] = {**new_data.get("light_states", {}), light.id: state}
-            if light.is_default:
-                new_data["hsv"] = state.get("hsv", {})
-                new_data["raw"] = state.get("raw", {})
-            self.async_set_updated_data(new_data)
+            try:
+                state = decode_color(color)
+            except ValueError as err:
+                _LOGGER.warning("Invalid color state for virtual light %s: %s", light_id, err)
+                return
+            self._publish_light_state(light, state)
             return
         new_data["hsv"] = color.get("hsv", {})
         new_data["raw"] = color.get("raw", {})
-        self.async_set_updated_data(new_data)
+        self._publish_partial_data(new_data)
 
     async def async_disconnect_ws(self) -> None:
         """Signal the WS listener to stop and close the socket."""
         self._closing = True
+        for cancel in self._light_refresh_unsubs.values():
+            cancel()
+        self._light_refresh_unsubs.clear()
         self._ws_ready.clear()
         if self._ws and not self._ws.closed:
             await self._ws.close()

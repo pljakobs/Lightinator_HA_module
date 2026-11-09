@@ -83,6 +83,8 @@ def discover_lights(
 
 def decode_color(color: dict[str, Any]) -> dict[str, Any]:
     """Convert 5.1 wire HSV radians/fractions to command degrees/percent."""
+    if not isinstance(color, dict):
+        raise ValueError("Invalid light state")
     hsv = color.get("hsv")
     if isinstance(hsv, dict):
         if any(not isinstance(hsv.get(key, 0), (int, float))
