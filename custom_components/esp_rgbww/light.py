@@ -360,6 +360,7 @@ class LightinatorVirtualLight(LightinatorMainLight):
     ) -> None:
         super().__init__(coordinator, entry)
         self._light_id = light.id
+        self._attr_extra_state_attributes = {"light_id": light.id}
         self._initial_light = light
         self._last_on_raw: list[int] = []
         self._attr_unique_id = (

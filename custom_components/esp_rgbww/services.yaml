@@ -137,6 +137,55 @@ scan_wifi:
     device:
       integration: esp_rgbww
 
+create_light:
+  name: Create light
+  description: Create a firmware 5.1 light. Pins must be unused PWM GPIOs in channel order. Firmware 5.0 is not supported.
+  target:
+    device:
+      integration: esp_rgbww
+  fields:
+    name:
+      name: Light name
+      required: true
+      selector:
+        text:
+    light_type:
+      name: Light type
+      default: SINGLE
+      selector:
+        select:
+          options: [SINGLE, WW, CW, WWCW, RGB, RGBWW, RGBCW, RGBWWCW]
+    pins:
+      name: GPIO pins
+      description: "Integer list in channel order: RGB = red/green/blue, followed by warm/cool white where applicable; WWCW = warm/cool white; SINGLE = output."
+      required: true
+      example: [18, 19]
+      selector:
+        object:
+    is_default:
+      name: Make default light
+      default: false
+      selector:
+        boolean:
+
+delete_light:
+  name: Delete light
+  description: Permanently delete a firmware 5.1 light by UUID. Its HA entities become unavailable. Deleting the final light is allowed.
+  target:
+    device:
+      integration: esp_rgbww
+  fields:
+    light_id:
+      name: Light UUID
+      required: true
+      selector:
+        text:
+    replacement_default:
+      name: New default light UUID
+      description: Required only when deleting the default light with other lights remaining.
+      selector:
+        text:
+
 connect_wifi:
   name: Connect to Wi-Fi
   description: Connect the selected controller to a Wi-Fi network.

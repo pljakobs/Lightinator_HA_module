@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import secrets
 import time
 import xml.etree.ElementTree as ET
+from uuid import uuid4
 from datetime import timedelta
 from typing import Any, Callable
 
@@ -19,7 +21,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN, UPDATE_INTERVAL
 from .rpc import RpcAuthenticationError, RpcError, authentication_hash
-from .virtual_lights import VirtualLight, decode_color, discover_lights
+from .virtual_lights import CHANNELS, VirtualLight, decode_color, discover_lights
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +140,197 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if resp.content_type == "application/json":
                 return await resp.json()
             return await resp.text()
+
+    async def async_manage_light(
+        self,
+        *,
+        name: str | None = None,
+        light_type: str = "SINGLE",
+        pins: list[int] | None = None,
+        is_default: bool = False,
+        delete_id: str | None = None,
+        replacement_default: str | None = None,
+        expected_configuration: dict[str, Any] | None = None,
+    ) -> None:
+        """Create/delete a 5.1 light with one verified configuration write."""
+        if self.virtual_lights is None:
+            raise ValueError("Light management requires firmware 5.1")
+        async with self._config_lock:
+            config = await self._get("/config")
+            version = str((self.data or {}).get("info", {}).get("app", {}).get("git_version", "V5.1"))
+            discovered = discover_lights(config, version)
+            if discovered is None:
+                raise ValueError("Light management requires firmware 5.1")
+            original = config["hardware"]["configuration"]
+            if expected_configuration is not None and original != expected_configuration:
+                raise ValueError("Configuration changed; reopen the form before applying")
+            candidate = copy.deepcopy(original)
+            lights = candidate["lights"]
+            if delete_id is not None:
+                if delete_id not in discovered:
+                    raise ValueError("Unknown or removed light UUID")
+                lights[:] = [light for light in lights if light["id"] != delete_id]
+                if discovered[delete_id].is_default and lights:
+                    if replacement_default not in {light["id"] for light in lights}:
+                        raise ValueError("Select a remaining light as the new default")
+                    for light in lights:
+                        light["is_default"] = light["id"] == replacement_default
+                elif replacement_default is not None:
+                    raise ValueError("A replacement default is only valid when deleting the default")
+            else:
+                if not isinstance(name, str) or not name.strip() or len(name.strip()) > 64:
+                    raise ValueError("Enter a light name of 1 to 64 characters")
+                if light_type not in CHANNELS or not isinstance(pins, list) or len(pins) != len(CHANNELS[light_type]):
+                    raise ValueError("GPIO count must match the light type")
+                if not isinstance(is_default, bool):
+                    raise ValueError("Default light selection must be a boolean")
+                if len(lights) >= 16:
+                    raise ValueError("At most 16 lights are supported")
+                index = max((light["index"] for light in lights), default=-1) + 1
+                if index >= 65535:
+                    raise ValueError("No unused light index available")
+                if is_default:
+                    for light in lights:
+                        light["is_default"] = False
+                lights.append({
+                    "id": str(uuid4()), "index": index, "name": name.strip(),
+                    "type": light_type, "pins": list(pins),
+                    "is_default": is_default or len(lights) == 0,
+                })
+
+                await self._async_validate_hardware_pins(candidate, config["hardware"])
+
+            candidate["revision"] = candidate.get("revision", 0) + 1
+            await self._async_write_hardware({"configuration": original}, {"configuration": candidate})
+        await self.async_request_refresh()
+
+    async def _async_validate_hardware_pins(
+        self, configuration: dict[str, Any], hardware: dict[str, Any]
+    ) -> None:
+        """Validate all assigned GPIOs against board functions and reservations."""
+        board = None
+        if configuration.get("board_id"):
+            catalog = await self.async_get_hardware_catalog()
+            board = next((board for board in catalog.get("boards", [])
+                          if board["id"] == configuration["board_id"]
+                          and board["revision"] == configuration.get("board_revision")
+                          and board["soc"] == configuration.get("soc")), None)
+            if board is None:
+                raise ValueError("Configured board is unavailable in the hardware catalog")
+        claimed = set(board.get("reserved_gpios", [])) if board else set()
+        available = next((entry["pins"] for entry in hardware.get("available_pins", [])
+                          if entry["soc"] == configuration.get("soc")), None)
+
+        def claim(pin: int, function: str) -> None:
+            if (not isinstance(pin, int) or isinstance(pin, bool)
+                    or not 0 <= pin <= 255 or pin in claimed):
+                raise ValueError("GPIO is invalid, assigned or reserved")
+            if board and not any(
+                entry["gpio"] == pin and function in entry.get("allowed_functions", [])
+                for entry in board.get("implemented_pins", [])
+            ):
+                raise ValueError(f"GPIO {pin} is not a board {function} pin")
+            if available is not None:
+                capability = next((entry["capability"] for entry in available
+                                   if entry["gpio"] == pin), 0)
+                required = 6 if function == "light.pwm" else 3 if function.startswith("i2c.") else 1
+                if capability & 64 or capability & required != required:
+                    raise ValueError(f"GPIO {pin} does not support {function} on this SoC")
+            claimed.add(pin)
+
+        system = configuration.get("system", {})
+        if system.get("clear_config_enabled"):
+            claim(system.get("clear_config_pin"), "system.clear_config")
+        for button in configuration.get("buttons", []):
+            claim(button.get("pin"), "button.input")
+        for bus in configuration.get("buses", []):
+            claim(bus.get("sda"), "i2c.sda")
+            claim(bus.get("scl"), "i2c.scl")
+        for light in configuration["lights"]:
+            for pin in light["pins"]:
+                claim(pin, "light.pwm")
+
+    async def async_get_hardware_catalog(self) -> dict[str, Any]:
+        """Read board profiles from the controller, not an external server."""
+        catalog = await self._get("/catalog")
+        if not isinstance(catalog, dict) or not isinstance(catalog.get("boards"), list):
+            raise ValueError("Hardware catalog is unavailable")
+        return catalog
+
+    @staticmethod
+    def _hardware_matches(saved: Any, expected: Any) -> bool:
+        """ConfigDB may add defaults, but must retain every submitted value."""
+        if isinstance(expected, dict):
+            return isinstance(saved, dict) and all(
+                key in saved and LightinatorCoordinator._hardware_matches(saved[key], value)
+                for key, value in expected.items()
+            )
+        if isinstance(expected, list):
+            return isinstance(saved, list) and len(saved) == len(expected) and all(
+                LightinatorCoordinator._hardware_matches(actual, value)
+                for actual, value in zip(saved, expected)
+            )
+        return saved == expected
+
+    async def _async_write_hardware(
+        self, original: dict[str, Any], update: dict[str, Any]
+    ) -> None:
+        """Write and verify hardware while the caller holds the config lock."""
+        latest = await self._get("/config")
+        if any(latest.get("hardware", {}).get(key) != value for key, value in original.items()):
+            raise ValueError("Configuration changed before applying; retry after reviewing it")
+        response = await self.async_post_http("/config", {"hardware": update})
+        if not isinstance(response, dict) or response.get("success") is not True:
+            raise ValueError(f"Controller rejected hardware configuration: {response}")
+        readback = await self._get("/config")
+        if not self._hardware_matches(readback.get("hardware"), update):
+            raise ValueError("Hardware configuration readback did not match; inspect the controller before retrying")
+        self._config = readback
+        self._next_metadata_refresh = 0
+        self._light_configuration_pending = True
+
+    async def async_update_hardware(
+        self, board_id: str, board_revision: int, pwm: dict[str, Any],
+        *, expected_hardware: dict[str, Any],
+    ) -> None:
+        """Change board metadata and PWM without replacing lights or inputs."""
+        if self.virtual_lights is None:
+            raise ValueError("Hardware configuration requires firmware 5.1")
+        async with self._config_lock:
+            config = await self._get("/config")
+            hardware = config["hardware"]
+            original = {key: hardware.get(key) for key in ("configuration", "pwm")}
+            if any(value != expected_hardware.get(key) for key, value in original.items()):
+                raise ValueError("Configuration changed; reopen the form before applying")
+            candidate = copy.deepcopy(hardware["configuration"])
+            soc = str((self.data or {}).get("info", {}).get("device", {}).get("soc", "")).lower()
+            if soc not in ("esp32", "esp32c3") or soc != candidate.get("soc"):
+                raise ValueError("Controller SoC is unavailable or contradicts its configuration")
+            if not isinstance(board_id, str) or not isinstance(board_revision, int) or isinstance(board_revision, bool):
+                raise ValueError("Invalid board selection")
+            if (board_id and board_revision < 1) or (not board_id and board_revision != 0):
+                raise ValueError("Invalid board revision")
+            candidate.update(board_id=board_id, board_revision=board_revision)
+            await self._async_validate_hardware_pins(candidate, hardware)
+            timer = pwm.get("timer", {})
+            spread = pwm.get("spreadSpectrum", {})
+            phase = pwm.get("phaseShift", {})
+            for values, key, minimum, maximum in (
+                (timer, "frequency", 1, 40000000), (timer, "resolution", 1, 14),
+                (timer, "number", 0, 3), (spread, "width", 0, 100),
+                (spread, "subsampling", 1, 65535),
+            ):
+                value = values.get(key)
+                if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+                    raise ValueError(f"Invalid PWM {key}")
+            modes = ("LOWSPEED", "HIGHSPEED") if soc == "esp32" else ("LOWSPEED",)
+            if timer.get("speed_mode") not in modes or spread.get("mode") not in ("ON", "OFF") or phase.get("mode") not in ("ON", "OFF"):
+                raise ValueError("Unsupported PWM mode for this controller")
+            candidate["revision"] = candidate.get("revision", 0) + 1
+            merged_pwm = copy.deepcopy(hardware.get("pwm", {}))
+            self._merge_config(merged_pwm, pwm)
+            await self._async_write_hardware(original, {"configuration": candidate, "pwm": merged_pwm})
+        await self.async_request_refresh()
 
     async def async_get_controller_icons(self) -> list[str]:
         """Read icon identifiers from the controller's locally served sprite."""

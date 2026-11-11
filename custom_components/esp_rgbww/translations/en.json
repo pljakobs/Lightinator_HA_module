@@ -12,6 +12,14 @@
       "name": "Scan Wi-Fi networks",
       "description": "Start a Wi-Fi scan on the selected controller."
     },
+    "create_light": {
+      "name": "Create light",
+      "description": "Create a firmware 5.1 light from a name, type and unused GPIO pins."
+    },
+    "delete_light": {
+      "name": "Delete light",
+      "description": "Permanently delete a firmware 5.1 light by UUID."
+    },
     "connect_wifi": {
       "name": "Connect to Wi-Fi",
       "description": "Connect the selected controller to a Wi-Fi network."
@@ -51,10 +59,59 @@
       "init": {
         "title": "Lightinator settings",
         "menu_options": {
+          "hardware": "Board and PWM settings",
+          "create_light": "Create light",
+          "delete_light": "Delete light",
           "color": "Color settings",
           "network": "Network settings",
           "firmware": "Firmware updates",
           "icon": "Controller icon"
+        }
+      },
+      "hardware": {
+        "title": "Board and PWM settings",
+        "description": "Choose the physical board and PWM parameters shared by all lights. Existing lights, GPIOs, buttons and I2C are preserved, not remapped by board selection. Assignments must be valid for the selected board. Changing PWM can interrupt outputs; unsupported frequency/resolution combinations can prevent outputs from starting. Older firmware may require a restart.",
+        "data": {
+          "board": "Board and revision",
+          "pwm_speed_mode": "PWM speed mode",
+          "pwm_frequency": "PWM frequency (Hz)",
+          "pwm_resolution": "PWM resolution (bits)",
+          "pwm_number": "PWM timer number",
+          "spread_enabled": "Enable spread spectrum",
+          "spread_width": "Spread spectrum width (%)",
+          "spread_subsampling": "PWM cycles per frequency update",
+          "phase_enabled": "Enable phase shift",
+          "confirm": "Confirm hardware changes"
+        }
+      },
+      "create_light": {
+        "title": "Create light",
+        "description": "Create a firmware light and its HA entities. The first light is automatically the default.",
+        "data": {
+          "name": "Light name",
+          "light_type": "Light type",
+          "is_default": "Make default light"
+        }
+      },
+      "light_pins": {
+        "title": "Light GPIOs",
+        "description": "Enter unused PWM GPIOs, not physical board pin numbers. {channels}. Board reservations, buttons, I2C and other lights must not overlap.",
+        "data": {
+          "r": "Red GPIO",
+          "g": "Green GPIO",
+          "b": "Blue GPIO",
+          "ww": "Warm-white GPIO",
+          "cw": "Cool-white GPIO",
+          "output": "Output GPIO"
+        }
+      },
+      "delete_light": {
+        "title": "Delete light",
+        "description": "Permanently removes the selected firmware light. HA entities remain unavailable to preserve automation identities. Select a replacement default only when deleting the default with other lights remaining. Deleting the final light is allowed.",
+        "data": {
+          "light_id": "Light to delete",
+          "replacement_default": "Replacement default",
+          "confirm": "Confirm permanent deletion"
         }
       },
       "color": {
@@ -127,7 +184,13 @@
           "controller_icon": "Icon"
         }
       },
+    "abort": {
+      "no_lights": "No lights are configured on this controller."
+    },
     "error": {
+      "light_management_failed": "Could not apply the light configuration. Check GPIO assignments and the default light; reopen Configure if the configuration changed. See the HA log for details.",
+      "hardware_configuration_failed": "Could not load or apply hardware settings. Check the board, pin assignments and PWM values; reopen Configure if settings changed. See the HA log for details.",
+      "confirmation_required": "Confirm the requested change before continuing.",
       "cannot_connect": "Could not read or update the controller configuration.",
       "invalid_network": "Check that the static gateway is in the same subnet as the controller IP.",
       "password_required": "Enter an API password before enabling protection.",

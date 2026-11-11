@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from typing import Any
 
 import aiohttp
@@ -27,6 +28,7 @@ from .const import (
 )
 from .coordinator import LightinatorCoordinator
 from .firmware_api import FirmwareVersionApi, firmware_selection
+from .virtual_lights import CHANNELS, CHANNEL_LABELS
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_COLOR_MODELS = ["RGB", "RGBWW", "RGBCW", "RGBWWCW"]
@@ -45,6 +47,10 @@ class LightinatorOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
+        self._light_edit_config: dict[str, Any] | None = None
+        self._new_light: dict[str, Any] = {}
+        self._hardware_edit: dict[str, Any] | None = None
+        self._boards: dict[str, dict[str, Any]] = {}
 
     def _coordinator(self) -> LightinatorCoordinator:
         return self.hass.data[DOMAIN][self._entry.entry_id]
@@ -57,10 +63,191 @@ class LightinatorOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init", menu_options=(
-                ["network", "firmware", "icon"]
+                ["hardware", "create_light", "delete_light", "network", "firmware", "icon"]
                 if self._coordinator().virtual_lights is not None
                 else ["color", "network", "firmware", "icon"]
             )
+        )
+
+    async def async_step_hardware(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select a board revision and controller-wide PWM settings."""
+        coordinator = self._coordinator()
+        if coordinator.virtual_lights is None:
+            return await self.async_step_init()
+        errors: dict[str, str] = {}
+        try:
+            if user_input is None or self._hardware_edit is None:
+                config = await self._config()
+                hardware = config["hardware"]
+                soc = str((coordinator.data or {}).get("info", {}).get("device", {}).get("soc", "")).lower()
+                if soc not in ("esp32", "esp32c3"):
+                    raise ValueError("Controller SoC is unavailable")
+                catalog = await coordinator.async_get_hardware_catalog()
+                self._boards = {
+                    f'{board["id"]}:{board["revision"]}': board
+                    for board in catalog["boards"] if board["soc"].lower() == soc
+                }
+                self._hardware_edit = deepcopy({
+                    "configuration": hardware["configuration"], "pwm": hardware.get("pwm", {})
+                })
+            if user_input is not None:
+                if not user_input.get("confirm"):
+                    errors["confirm"] = "confirmation_required"
+                else:
+                    board_key = user_input["board"]
+                    board = self._boards.get(board_key)
+                    if board_key and board is None:
+                        raise ValueError("Selected board is no longer available")
+                    pwm = {
+                        "timer": {key: user_input[f"pwm_{key}"] for key in ("speed_mode", "frequency", "resolution", "number")},
+                        "spreadSpectrum": {
+                            "mode": "ON" if user_input["spread_enabled"] else "OFF",
+                            "width": user_input["spread_width"],
+                            "subsampling": user_input["spread_subsampling"],
+                        },
+                        "phaseShift": {"mode": "ON" if user_input["phase_enabled"] else "OFF"},
+                    }
+                    await coordinator.async_update_hardware(
+                        board["id"] if board else "", board["revision"] if board else 0,
+                        pwm, expected_hardware=self._hardware_edit,
+                    )
+                    return self.async_create_entry(title="", data=dict(self._entry.options))
+        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as err:
+            _LOGGER.warning("Unable to configure hardware: %s", err)
+            errors["base"] = "hardware_configuration_failed"
+        if self._hardware_edit is None:
+            return self.async_show_form(step_id="hardware", data_schema=vol.Schema({}), errors=errors)
+        configuration = self._hardware_edit["configuration"]
+        pwm = self._hardware_edit["pwm"]
+        timer = pwm.get("timer", {})
+        spread = pwm.get("spreadSpectrum", {})
+        board_key = f'{configuration.get("board_id")}:{configuration.get("board_revision")}' if configuration.get("board_id") else ""
+        choices = [{"value": "", "label": "Custom GPIOs (no board profile)"}] + [
+            {"value": key, "label": f'{board["name"]} (rev {board["revision"]})'}
+            for key, board in self._boards.items()
+        ]
+        if board_key and board_key not in self._boards:
+            choices.append({"value": board_key, "label": f"Current unavailable board: {board_key}"})
+        modes = ["LOWSPEED", "HIGHSPEED"] if configuration.get("soc") == "esp32" else ["LOWSPEED"]
+        defaults = {
+            "board": board_key, "pwm_speed_mode": timer.get("speed_mode", "LOWSPEED"),
+            "pwm_frequency": timer.get("frequency", 1000),
+            "pwm_resolution": timer.get("resolution", 10), "pwm_number": timer.get("number", 0),
+            "spread_enabled": spread.get("mode", "ON") == "ON",
+            "spread_width": spread.get("width", 15), "spread_subsampling": spread.get("subsampling", 4),
+            "phase_enabled": pwm.get("phaseShift", {}).get("mode", "ON") == "ON", "confirm": False,
+        }
+        if user_input is not None:
+            defaults.update(user_input)
+        validators = {
+            "board": SelectSelector(SelectSelectorConfig(options=choices, mode=SelectSelectorMode.DROPDOWN)),
+            "pwm_speed_mode": SelectSelector(SelectSelectorConfig(options=modes, mode=SelectSelectorMode.DROPDOWN)),
+            "pwm_frequency": vol.All(int, vol.Range(min=1, max=40000000)),
+            "pwm_resolution": vol.All(int, vol.Range(min=1, max=14)),
+            "pwm_number": vol.All(int, vol.Range(min=0, max=3)),
+            "spread_enabled": bool, "spread_width": vol.All(int, vol.Range(min=0, max=100)),
+            "spread_subsampling": vol.All(int, vol.Range(min=1, max=65535)),
+            "phase_enabled": bool, "confirm": bool,
+        }
+        return self.async_show_form(
+            step_id="hardware",
+            data_schema=vol.Schema({vol.Required(key, default=defaults[key]): validator for key, validator in validators.items()}),
+            errors=errors,
+        )
+
+    async def async_step_create_light(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if self._coordinator().virtual_lights is None:
+            return await self.async_step_init()
+        if user_input is not None:
+            self._new_light = dict(user_input)
+            return await self.async_step_light_pins()
+        return self.async_show_form(
+            step_id="create_light",
+            data_schema=vol.Schema({
+                vol.Required("name"): vol.All(str, vol.Length(min=1, max=64)),
+                vol.Required("light_type", default="SINGLE"): SelectSelector(
+                    SelectSelectorConfig(options=list(CHANNELS), mode=SelectSelectorMode.DROPDOWN)
+                ),
+                vol.Required("is_default", default=False): bool,
+            }),
+        )
+
+    async def async_step_light_pins(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if self._coordinator().virtual_lights is None:
+            return await self.async_step_init()
+        if not self._new_light:
+            return await self.async_step_create_light()
+        errors: dict[str, str] = {}
+        channels = CHANNELS[self._new_light["light_type"]]
+        try:
+            if user_input is None or self._light_edit_config is None:
+                self._light_edit_config = deepcopy((await self._config())["hardware"]["configuration"])
+            if user_input is not None:
+                await self._coordinator().async_manage_light(
+                    **self._new_light, pins=[user_input[channel] for channel in channels],
+                    expected_configuration=self._light_edit_config,
+                )
+                return self.async_create_entry(title="", data=dict(self._entry.options))
+        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as err:
+            _LOGGER.warning("Unable to create light: %s", err)
+            errors["base"] = "light_management_failed"
+        return self.async_show_form(
+            step_id="light_pins",
+            data_schema=vol.Schema({
+                vol.Required(channel): vol.All(int, vol.Range(min=0, max=255))
+                for channel in channels
+            }),
+            errors=errors,
+            description_placeholders={
+                "channels": ", ".join(f"{channel}: {CHANNEL_LABELS[channel]}" for channel in channels)
+            },
+        )
+
+    async def async_step_delete_light(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        coordinator = self._coordinator()
+        if coordinator.virtual_lights is None:
+            return await self.async_step_init()
+        errors: dict[str, str] = {}
+        try:
+            if user_input is None or self._light_edit_config is None:
+                self._light_edit_config = deepcopy((await self._config())["hardware"]["configuration"])
+            if user_input is not None:
+                if not user_input.get("confirm"):
+                    errors["confirm"] = "confirmation_required"
+                else:
+                    await coordinator.async_manage_light(
+                        delete_id=user_input["light_id"],
+                        replacement_default=user_input.get("replacement_default"),
+                        expected_configuration=self._light_edit_config,
+                    )
+                    return self.async_create_entry(title="", data=dict(self._entry.options))
+        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as err:
+            _LOGGER.warning("Unable to delete light: %s", err)
+            errors["base"] = "light_management_failed"
+        lights = (self._light_edit_config or {}).get("lights", [])
+        if not lights and not errors:
+            return self.async_abort(reason="no_lights")
+        choices = [{"value": light["id"], "label": light["name"] or light["id"]} for light in lights]
+        return self.async_show_form(
+            step_id="delete_light",
+            data_schema=vol.Schema({
+                vol.Required("light_id"): SelectSelector(
+                    SelectSelectorConfig(options=choices, mode=SelectSelectorMode.DROPDOWN)
+                ),
+                vol.Optional("replacement_default"): SelectSelector(
+                    SelectSelectorConfig(options=choices, mode=SelectSelectorMode.DROPDOWN)
+                ),
+                vol.Required("confirm", default=False): bool,
+            }),
+            errors=errors,
         )
 
     def _firmware_api(self, config: dict[str, Any]) -> FirmwareVersionApi:

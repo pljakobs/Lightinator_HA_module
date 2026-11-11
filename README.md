@@ -10,6 +10,8 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 - **Automatic discovery** via mDNS (Zeroconf) — no IP configuration needed
 - **5.0 compatibility**: the existing main light, raw channels, entity identities and untargeted API remain supported
 - **5.1 virtual lights**: one primary light entity per configured firmware light, sharing one controller device and WebSocket
+- **5.1 light management**: create and delete firmware lights from Configure or HA actions, with pin and default-light validation
+- **5.1 hardware settings**: board/revision selection and controller-wide PWM timer, spread spectrum and phase shift in Configure
 - **Profile-aware controls**: brightness for SINGLE/WW/CW, brightness and color temperature for WWCW, HS for RGB, RGBW for RGBWW/RGBCW, and HS/color temperature/RGBWW for RGBWWCW
 - **RAW channel controls**: optional per-channel brightness lights (disabled by default for new 5.1 entities)
 - **Preset select** — apply saved colour presets from the device
@@ -45,8 +47,22 @@ IP, netmask, gateway, and DHCP are submitted together. Some changes reboot the
 controller; its stable `/info` device ID keeps the HA device identity unchanged.
 Use **Controller icon** in Configure to choose a locally available controller
 icon; the selected sprite ID is saved to the controller's app-data.
-On 5.1, configure light types, pins and per-light calibration in the controller's
-webapp. The legacy controller-wide **Color** form is only offered on 5.0.
+On 5.1, **Create light** in Configure lets you choose a name, output type and
+unused PWM GPIOs. **Delete light** requires confirmation; when removing the
+default with other lights remaining, choose its replacement. The final light
+can be deleted. **Board and PWM settings** selects a SoC-compatible board and
+revision from the controller's local catalog, or custom GPIOs without a board
+profile. It also configures PWM frequency, resolution (1–14 bits), timer number,
+speed mode (high speed only on ESP32), spread spectrum width/subsampling and
+phase shift. Existing lights, calibration, buttons and I2C settings are preserved;
+selecting a board does not install a template or remap GPIOs. Incompatible pin
+assignments are rejected. Changes require confirmation, stale-edit checks and
+persistent readback verification. PWM frequency/resolution combinations remain
+subject to hardware clock limits; firmware may reject output initialization even
+when configuration readback succeeds. Older 5.1 builds may require a restart.
+Editing existing lights/calibration and input/bus assignments remains in the
+controller's webapp. The legacy controller-wide **Color** form is only offered
+on 5.0.
 The firmware update entity derives the Lightinator Version API URL from the
 controller's configured OTA catalog URL. Use its Firmware options to choose an
 available branch and debug or release build; available choices are filtered by
@@ -116,6 +132,19 @@ controller's **current default** light. `fade_sequence`, `blink` and
 targeting; omitting it preserves their legacy default-light behavior.
 An invalid or removed UUID raises an error and never targets the default.
 Standard HA light services, scenes and automations target individual entities.
+The `esp_rgbww.create_light` action takes a controller device target, `name`,
+`light_type`, a `pins` integer list in channel order, and optional `is_default`.
+For example, WWCW uses `[warm_white_gpio, cool_white_gpio]`; RGBWWCW uses
+`[red_gpio, green_gpio, blue_gpio, warm_white_gpio, cool_white_gpio]`.
+`esp_rgbww.delete_light` takes `light_id` and, only when deleting the default
+with other lights remaining, `replacement_default` (both firmware UUIDs).
+The UUID is exposed as the primary light entity's `light_id` state attribute.
+These actions reject 5.0 controllers and invalid or stale configurations.
+Writes preserve other hardware settings, use a new UUID for each new light,
+and verify persistent configuration readback. The integration refreshes discovery
+after a successful write; new entities appear and deleted entities become
+unavailable without rebinding existing identities. Current 5.1 firmware reloads
+outputs live; older builds may need a controller restart to activate changes.
 The firmware preset store does not support indexed RAW arrays. Saving a
 single-channel/WWCW RAW state as a controller preset therefore reports an error;
 use an HA scene instead. HSV and named RGB RAW presets retain their existing

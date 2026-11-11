@@ -5,14 +5,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import aiohttp
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, PLATFORMS
 from .coordinator import LightinatorCoordinator
+from .virtual_lights import CHANNELS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +104,25 @@ def _register_services(hass: HomeAssistant) -> None:
         for coordinator in _get_coordinators_for_call(hass, call):
             await coordinator.async_post_http("/connect", payload)
 
+    async def handle_manage_light(call: ServiceCall) -> None:
+        coordinators = _get_coordinators_for_call(hass, call)
+        if not coordinators:
+            raise HomeAssistantError("Select a configured Lightinator controller")
+        for coordinator in coordinators:
+            try:
+                if call.service == "delete_light":
+                    await coordinator.async_manage_light(
+                        delete_id=call.data["light_id"],
+                        replacement_default=call.data.get("replacement_default"),
+                    )
+                else:
+                    await coordinator.async_manage_light(
+                        name=call.data["name"], light_type=call.data["light_type"],
+                        pins=call.data["pins"], is_default=call.data["is_default"],
+                    )
+            except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+                raise HomeAssistantError(str(err)) from err
+
     async def handle_discover_cluster(call: ServiceCall) -> None:
         """Discover and add controllers listed by /hosts on target device(s)."""
         added = 0
@@ -147,6 +170,25 @@ def _register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "save_preset", handle_save_preset)
     hass.services.async_register(DOMAIN, "scan_wifi", handle_scan_wifi)
     hass.services.async_register(DOMAIN, "connect_wifi", handle_connect_wifi)
+    target_schema = {vol.Required("device_id"): vol.All(cv.ensure_list, [cv.string])}
+    hass.services.async_register(
+        DOMAIN, "create_light", handle_manage_light,
+        schema=vol.Schema({
+            **target_schema,
+            vol.Required("name"): vol.All(cv.string, vol.Length(min=1, max=64)),
+            vol.Required("light_type", default="SINGLE"): vol.In(CHANNELS),
+            vol.Required("pins"): [vol.All(int, vol.Range(min=0, max=255))],
+            vol.Optional("is_default", default=False): cv.boolean,
+        }),
+    )
+    hass.services.async_register(
+        DOMAIN, "delete_light", handle_manage_light,
+        schema=vol.Schema({
+            **target_schema,
+            vol.Required("light_id"): cv.string,
+            vol.Optional("replacement_default"): cv.string,
+        }),
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from homeassistant.components.light import ColorMode, valid_supported_color_modes
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.exceptions import HomeAssistantError
 
+from custom_components.esp_rgbww import _register_services
 from custom_components.esp_rgbww.coordinator import LightinatorCoordinator
 from custom_components.esp_rgbww.light import (
     LightinatorChannelLight,
@@ -781,6 +783,406 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
             self.install("WWCW")
             await flow.async_step_init()
             self.assertNotIn("color", menu.call_args.kwargs["menu_options"])
+            self.assertIn("create_light", menu.call_args.kwargs["menu_options"])
+            self.assertIn("delete_light", menu.call_args.kwargs["menu_options"])
+
+    def management_config(self, *types):
+        self.install(*types)
+        config = configuration(*types)
+        hardware = config["hardware"]["configuration"]
+        hardware.update({
+            "revision": 7, "soc": "esp32", "board_id": "", "template_id": "keep",
+            "system": {"clear_config_enabled": True, "clear_config_pin": 21},
+            "buttons": [{"pin": 22}], "buses": [{"sda": 23, "scl": 25}],
+        })
+        pin = 1
+        for light in hardware["lights"]:
+            light["pins"] = list(range(pin, pin + len(CHANNELS[light["type"]])))
+            pin += len(light["pins"])
+        self.saved_config = copy.deepcopy(config)
+        self.coordinator._get.side_effect = lambda path: copy.deepcopy(self.saved_config)
+
+        async def save(path, payload):
+            self.assertEqual(path, "/config")
+            self.saved_config["hardware"].update(copy.deepcopy(payload["hardware"]))
+            return {"success": True}
+
+        self.coordinator.async_post_http = AsyncMock(side_effect=save)
+        self.coordinator.async_request_refresh = AsyncMock()
+        return config
+
+    async def test_create_all_profiles_preserves_hardware_and_refreshes(self):
+        for light_type, channels in CHANNELS.items():
+            with self.subTest(light_type=light_type):
+                original = self.management_config("SINGLE")
+                await self.coordinator.async_manage_light(
+                    name=" New output ", light_type=light_type,
+                    pins=list(range(10, 10 + len(channels))),
+                )
+                saved = self.saved_config["hardware"]["configuration"]
+                self.assertEqual(saved["revision"], 8)
+                self.assertEqual(saved["lights"][0], original["hardware"]["configuration"]["lights"][0])
+                self.assertEqual(saved["lights"][1]["index"], 4)
+                self.assertEqual(saved["lights"][1]["name"], "New output")
+                self.assertFalse(saved["lights"][1]["is_default"])
+                self.assertNotEqual(saved["lights"][1]["id"], "uuid-0")
+                for key in ("system", "buttons", "buses", "template_id", "soc"):
+                    self.assertEqual(saved[key], original["hardware"]["configuration"][key])
+                self.coordinator.async_request_refresh.assert_awaited_once()
+                self.assertEqual(self.coordinator._next_metadata_refresh, 0)
+                self.assertTrue(self.coordinator._light_configuration_pending)
+
+    async def test_first_created_light_is_default_and_can_replace_default(self):
+        self.management_config()
+        await self.coordinator.async_manage_light(name="First", pins=[18])
+        first = self.saved_config["hardware"]["configuration"]["lights"][0]
+        self.assertTrue(first["is_default"])
+        self.assertEqual(first["index"], 0)
+        await self.coordinator.async_manage_light(name="Second", pins=[19], is_default=True)
+        lights = self.saved_config["hardware"]["configuration"]["lights"]
+        self.assertFalse(lights[0]["is_default"])
+        self.assertTrue(lights[1]["is_default"])
+        self.assertNotEqual(lights[0]["id"], lights[1]["id"])
+
+    async def test_creation_rejects_invalid_and_conflicting_pins_before_posting(self):
+        invalid = ([1], [21], [22], [23], [25], [True], [1.5], [-1], [256], [])
+        for pins in invalid:
+            with self.subTest(pins=pins):
+                self.management_config("SINGLE")
+                with self.assertRaises(ValueError):
+                    await self.coordinator.async_manage_light(name="New", pins=pins)
+                self.coordinator.async_post_http.assert_not_awaited()
+        self.management_config("SINGLE")
+        with self.assertRaises(ValueError):
+            await self.coordinator.async_manage_light(name="New", light_type="WWCW", pins=[18, 18])
+        for name in (" ", "x" * 65):
+            with self.assertRaises(ValueError):
+                await self.coordinator.async_manage_light(name=name, pins=[18])
+        with self.assertRaises(ValueError):
+            await self.coordinator.async_manage_light(name="New", light_type="INVALID", pins=[18])
+        self.coordinator.async_post_http.assert_not_awaited()
+
+    async def test_creation_checks_board_outputs_and_reservations(self):
+        self.management_config("SINGLE")
+        self.saved_config["hardware"]["configuration"].update(board_id="board", board_revision=1)
+        board = {"id": "board", "revision": 1, "soc": "esp32", "reserved_gpios": [18],
+                 "implemented_pins": [{"gpio": pin, "allowed_functions": ["light.pwm"]}
+                                      for pin in (1, 18, 19)] + [
+                                          {"gpio": pin, "allowed_functions": [function]}
+                                          for pin, function in ((21, "system.clear_config"), (22, "button.input"),
+                                                                (23, "i2c.sda"), (25, "i2c.scl"))
+                                      ]}
+        self.coordinator._get.side_effect = lambda path: (
+            {"boards": [board]} if path == "/catalog" else copy.deepcopy(self.saved_config)
+        )
+        for pin in (18, 20):
+            with self.assertRaises(ValueError):
+                await self.coordinator.async_manage_light(name="New", pins=[pin])
+        self.coordinator.async_post_http.assert_not_awaited()
+        await self.coordinator.async_manage_light(name="New", pins=[19])
+
+    async def test_creation_rejects_count_and_index_limits(self):
+        self.management_config(*(["SINGLE"] * 16))
+        with self.assertRaisesRegex(ValueError, "16"):
+            await self.coordinator.async_manage_light(name="New", pins=[18])
+        self.coordinator.async_post_http.assert_not_awaited()
+        self.management_config("SINGLE")
+        self.saved_config["hardware"]["configuration"]["lights"][0]["index"] = 65534
+        with self.assertRaisesRegex(ValueError, "index"):
+            await self.coordinator.async_manage_light(name="New", pins=[18])
+        self.coordinator.async_post_http.assert_not_awaited()
+
+    async def test_delete_requires_existing_uuid_and_explicit_replacement_default(self):
+        original = self.management_config("SINGLE", "SINGLE")
+        for args in ({"delete_id": "missing"}, {"delete_id": "uuid-0"},
+                     {"delete_id": "uuid-0", "replacement_default": "uuid-0"},
+                     {"delete_id": "uuid-1", "replacement_default": "uuid-0"}):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                await self.coordinator.async_manage_light(**args)
+        self.coordinator.async_post_http.assert_not_awaited()
+        await self.coordinator.async_manage_light(delete_id="uuid-0", replacement_default="uuid-1")
+        saved = self.saved_config["hardware"]["configuration"]["lights"]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["id"], "uuid-1")
+        self.assertEqual(saved[0]["index"], 4)
+        self.assertTrue(saved[0]["is_default"])
+        self.assertEqual(saved[0]["color"], original["hardware"]["configuration"]["lights"][1]["color"])
+
+    async def test_delete_nondefault_and_final_light(self):
+        self.management_config("SINGLE", "SINGLE")
+        await self.coordinator.async_manage_light(delete_id="uuid-1")
+        self.assertTrue(self.saved_config["hardware"]["configuration"]["lights"][0]["is_default"])
+        await self.coordinator.async_manage_light(delete_id="uuid-0")
+        self.assertEqual(self.saved_config["hardware"]["configuration"]["lights"], [])
+
+    async def test_stale_form_and_concurrent_edit_are_not_overwritten(self):
+        original = self.management_config("SINGLE")
+        expected = copy.deepcopy(original["hardware"]["configuration"])
+        expected["revision"] -= 1
+        with self.assertRaisesRegex(ValueError, "changed"):
+            await self.coordinator.async_manage_light(name="New", pins=[18], expected_configuration=expected)
+        changed = copy.deepcopy(original)
+        changed["hardware"]["configuration"]["revision"] += 1
+        self.coordinator._get.side_effect = [original, changed]
+        with self.assertRaisesRegex(ValueError, "changed"):
+            await self.coordinator.async_manage_light(name="New", pins=[18])
+        self.coordinator.async_post_http.assert_not_awaited()
+
+    async def test_rejected_write_and_bad_readback_do_not_report_success(self):
+        self.management_config("SINGLE")
+        self.coordinator.async_post_http.side_effect = None
+        self.coordinator.async_post_http.return_value = {"success": False, "error": "Rejected"}
+        with self.assertRaisesRegex(ValueError, "rejected"):
+            await self.coordinator.async_manage_light(name="New", pins=[18])
+        self.coordinator.async_post_http.return_value = {"success": True}
+        with self.assertRaisesRegex(ValueError, "readback"):
+            await self.coordinator.async_manage_light(name="New", pins=[18])
+        self.coordinator.async_request_refresh.assert_not_awaited()
+
+    async def test_management_is_never_available_on_50(self):
+        self.coordinator.data = {}
+        for args in ({"name": "New", "pins": [18]}, {"delete_id": "uuid-0"}):
+            with self.assertRaisesRegex(ValueError, "5.1"):
+                await self.coordinator.async_manage_light(**args)
+        self.coordinator._get.assert_not_awaited()
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        with patch.object(flow, "async_show_menu", return_value={}) as menu:
+            await flow.async_step_create_light({"name": "New"})
+            await flow.async_step_delete_light({"light_id": "uuid-0", "confirm": True})
+            for call in menu.call_args_list:
+                self.assertNotIn("create_light", call.kwargs["menu_options"])
+                self.assertNotIn("delete_light", call.kwargs["menu_options"])
+
+    async def test_options_forms_create_and_require_delete_confirmation(self):
+        self.entry.options = {}
+        self.management_config("SINGLE")
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        with patch.object(flow, "async_show_form", return_value={}), \
+                patch.object(flow, "async_create_entry", return_value={"type": "create_entry"}):
+            await flow.async_step_create_light({"name": "White", "light_type": "WWCW", "is_default": False})
+            result = await flow.async_step_light_pins({"ww": 18, "cw": 19})
+            self.assertEqual(result["type"], "create_entry")
+        self.management_config("SINGLE")
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        with patch.object(flow, "async_show_form", return_value={}) as form, \
+                patch.object(flow, "async_create_entry", return_value={"type": "create_entry"}):
+            await flow.async_step_delete_light()
+            await flow.async_step_delete_light({"light_id": "uuid-0", "confirm": False})
+            self.assertEqual(form.call_args.kwargs["errors"], {"confirm": "confirmation_required"})
+            self.coordinator.async_post_http.assert_not_awaited()
+            result = await flow.async_step_delete_light({"light_id": "uuid-0", "confirm": True})
+            self.assertEqual(result["type"], "create_entry")
+
+    async def test_management_services_route_validate_and_surface_errors(self):
+        self.management_config("SINGLE")
+        _register_services(self.hass)
+        with patch("custom_components.esp_rgbww._get_coordinators_for_call", return_value=[self.coordinator]):
+            await self.hass.services.async_call(
+                "esp_rgbww", "create_light",
+                {"device_id": "controller", "name": "New", "pins": [18]}, blocking=True,
+            )
+            await self.hass.services.async_call(
+                "esp_rgbww", "delete_light",
+                {"device_id": "controller", "light_id": "uuid-0",
+                 "replacement_default": self.saved_config["hardware"]["configuration"]["lights"][1]["id"]},
+                blocking=True,
+            )
+            with self.assertRaises(HomeAssistantError):
+                await self.hass.services.async_call(
+                    "esp_rgbww", "delete_light",
+                    {"device_id": "controller", "light_id": "removed"}, blocking=True,
+                )
+
+    async def test_management_refresh_adds_entities_and_makes_deleted_uuid_unavailable(self):
+        self.management_config("SINGLE")
+        entities, callbacks, registry = await self.setup_platform()
+        old = entities[0]
+        self.assertTrue(old.available)
+        self.assertEqual(old.extra_state_attributes, {"light_id": "uuid-0"})
+
+        async def rpc(method, params):
+            if method == "info":
+                return {"app": {"git_version": "V5.1.0"}}
+            return {"raw": [512] if params["light"] == 3 else [512, 256]}
+
+        self.coordinator._rpc_request.side_effect = rpc
+        del self.coordinator.async_add_listener
+        for callback in callbacks:
+            self.coordinator.async_add_listener(callback)
+        self.coordinator.async_request_refresh = AsyncMock(side_effect=self.coordinator.async_refresh)
+        with patch("custom_components.esp_rgbww.light.er.async_get", return_value=registry):
+            await self.coordinator.async_manage_light(name="White", light_type="WWCW", pins=[18, 19])
+            self.assertEqual(len(entities), 4)
+            new_id = self.saved_config["hardware"]["configuration"]["lights"][1]["id"]
+            self.assertEqual(entities[1].unique_id, f"123_{new_id}")
+            self.assertEqual(entities[1].extra_state_attributes, {"light_id": new_id})
+            self.assertTrue(entities[1].available)
+            await self.coordinator.async_manage_light(delete_id="uuid-0", replacement_default=new_id)
+            self.assertFalse(old.available)
+            self.assertTrue(entities[1].available)
+            self.assertEqual(len(entities), 4)
+
+    def hardware_config(self, soc="esp32"):
+        self.management_config("SINGLE")
+        self.coordinator.data["info"] = {"device": {"soc": soc}, "app": {"git_version": "V5.1.0"}}
+        self.saved_config["hardware"]["configuration"]["soc"] = soc
+        pwm = {
+            "timer": {"speed_mode": "LOWSPEED", "frequency": 1000, "resolution": 10, "number": 0},
+            "spreadSpectrum": {"mode": "ON", "width": 15, "subsampling": 4},
+            "phaseShift": {"mode": "ON"},
+        }
+        self.saved_config["hardware"]["pwm"] = copy.deepcopy(pwm)
+        board = {
+            "id": "test-board", "revision": 2, "soc": soc, "name": "Test board",
+            "reserved_gpios": [18],
+            "implemented_pins": [
+                {"gpio": pin, "allowed_functions": [function]}
+                for pin, function in ((1, "light.pwm"), (21, "system.clear_config"),
+                                      (22, "button.input"), (23, "i2c.sda"), (25, "i2c.scl"))
+            ],
+        }
+        self.catalog = {"boards": [board, {**board, "id": "other-soc", "soc": "esp32c3" if soc == "esp32" else "esp32"}]}
+        self.coordinator._get.side_effect = lambda path: (
+            copy.deepcopy(self.catalog) if path == "/catalog" else copy.deepcopy(self.saved_config)
+        )
+        return copy.deepcopy(self.saved_config["hardware"]), pwm
+
+    async def test_hardware_board_pwm_update_preserves_all_assignments(self):
+        original, pwm = self.hardware_config()
+        pwm["timer"].update(speed_mode="HIGHSPEED", frequency=2000, resolution=12, number=3)
+        pwm["spreadSpectrum"].update(mode="OFF", width=0, subsampling=1)
+        pwm["phaseShift"]["mode"] = "OFF"
+        await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
+        saved = self.saved_config["hardware"]
+        expected_configuration = {**original["configuration"], "board_id": "test-board", "board_revision": 2, "revision": 8}
+        self.assertEqual(saved["configuration"], expected_configuration)
+        self.assertEqual(saved["pwm"], pwm)
+        self.coordinator.async_request_refresh.assert_awaited_once()
+        self.coordinator.async_post_http.assert_awaited_once()
+        self.assertEqual(set(self.coordinator.async_post_http.call_args.args[1]["hardware"]), {"configuration", "pwm"})
+        next_expected = copy.deepcopy(saved)
+        await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=next_expected)
+        self.assertEqual(saved["configuration"]["board_id"], "")
+        self.assertEqual(saved["configuration"]["board_revision"], 0)
+
+    async def test_hardware_rejects_wrong_board_revision_soc_and_input_conflicts(self):
+        for board_id, revision in (("test-board", 1), ("other-soc", 2), ("unknown", 2), ("", 1)):
+            original, pwm = self.hardware_config()
+            with self.subTest(board_id=board_id, revision=revision), self.assertRaises(ValueError):
+                await self.coordinator.async_update_hardware(board_id, revision, pwm, expected_hardware=original)
+            self.coordinator.async_post_http.assert_not_awaited()
+        for pin in (1, 21, 22, 23, 25):
+            original, pwm = self.hardware_config()
+            self.catalog["boards"][0]["reserved_gpios"].append(pin)
+            with self.subTest(pin=pin), self.assertRaises(ValueError):
+                await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
+            self.coordinator.async_post_http.assert_not_awaited()
+
+    async def test_hardware_pwm_validation_and_c3_modes(self):
+        invalid = (
+            ("timer", "frequency", 0), ("timer", "resolution", 0), ("timer", "resolution", 15),
+            ("timer", "number", 4), ("timer", "frequency", True), ("timer", "speed_mode", "wrong"),
+            ("spreadSpectrum", "width", 101), ("spreadSpectrum", "subsampling", 0),
+            ("spreadSpectrum", "subsampling", 65536), ("phaseShift", "mode", "wrong"),
+        )
+        for section, key, value in invalid:
+            original, pwm = self.hardware_config()
+            pwm[section][key] = value
+            with self.subTest(section=section, key=key, value=value), self.assertRaises(ValueError):
+                await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            self.coordinator.async_post_http.assert_not_awaited()
+        original, pwm = self.hardware_config("esp32c3")
+        pwm["timer"]["speed_mode"] = "HIGHSPEED"
+        with self.assertRaisesRegex(ValueError, "mode"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        self.coordinator.async_post_http.assert_not_awaited()
+        pwm["timer"]["speed_mode"] = "LOWSPEED"
+        await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+
+    async def test_hardware_stale_pwm_and_bad_readback_surface_errors(self):
+        original, pwm = self.hardware_config()
+        original["pwm"]["timer"]["number"] = 1
+        with self.assertRaisesRegex(ValueError, "changed"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        self.coordinator.async_post_http.assert_not_awaited()
+        original, pwm = self.hardware_config()
+        changed = copy.deepcopy(self.saved_config)
+        changed["hardware"]["pwm"]["timer"]["frequency"] = 2000
+        self.coordinator._get.side_effect = [copy.deepcopy(self.saved_config), changed]
+        with self.assertRaisesRegex(ValueError, "changed"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        self.coordinator.async_post_http.assert_not_awaited()
+        original, pwm = self.hardware_config()
+        self.coordinator.async_post_http.side_effect = None
+        self.coordinator.async_post_http.return_value = {"success": True}
+        with self.assertRaisesRegex(ValueError, "readback"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        self.coordinator.async_request_refresh.assert_not_awaited()
+
+    async def test_custom_hardware_gpio_capabilities_and_soc_identity_are_checked(self):
+        original, pwm = self.hardware_config()
+        self.saved_config["hardware"]["available_pins"] = [{
+            "soc": "esp32", "pins": [
+                {"gpio": pin, "capability": 7}
+                for pin in (1, 21, 22, 23, 25)
+            ],
+        }]
+        self.saved_config["hardware"]["available_pins"][0]["pins"][0]["capability"] = 1
+        with self.assertRaisesRegex(ValueError, "support"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        self.coordinator.async_post_http.assert_not_awaited()
+        self.saved_config["hardware"]["available_pins"][0]["pins"][0]["capability"] = 7
+        await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        original, pwm = self.hardware_config()
+        self.coordinator.data["info"]["device"]["soc"] = "esp32c3"
+        with self.assertRaisesRegex(ValueError, "SoC"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        self.coordinator.async_post_http.assert_not_awaited()
+
+    async def test_hardware_configure_form_filters_boards_and_requires_confirmation(self):
+        self.entry.options = {}
+        original, _pwm = self.hardware_config("esp32c3")
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        with patch.object(flow, "async_show_form", return_value={}) as form, \
+                patch.object(flow, "async_create_entry", return_value={"type": "create_entry"}):
+            await flow.async_step_hardware()
+            self.assertEqual(set(flow._boards), {"test-board:2"})
+            schema = form.call_args.kwargs["data_schema"]
+            values = schema({})
+            self.assertEqual(values["pwm_frequency"], 1000)
+            self.assertEqual(values["spread_subsampling"], 4)
+            self.assertFalse(values["confirm"])
+            mode_selector = next(value for key, value in schema.schema.items() if str(key) == "pwm_speed_mode")
+            self.assertEqual(mode_selector.config["options"], ["LOWSPEED"])
+            await flow.async_step_hardware(values)
+            self.assertEqual(form.call_args.kwargs["errors"], {"confirm": "confirmation_required"})
+            self.coordinator.async_post_http.assert_not_awaited()
+            values.update(confirm=True, board="test-board:2", pwm_frequency=2000)
+            result = await flow.async_step_hardware(values)
+            self.assertEqual(result["type"], "create_entry")
+            self.assertEqual(self.saved_config["hardware"]["configuration"]["lights"], original["configuration"]["lights"])
+            self.assertEqual(self.saved_config["hardware"]["pwm"]["timer"]["frequency"], 2000)
+
+    async def test_hardware_unavailable_catalog_and_legacy_are_not_writable(self):
+        self.entry.options = {}
+        original, pwm = self.hardware_config()
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        self.catalog = {"boards": None}
+        with patch.object(flow, "async_show_form", return_value={}) as form:
+            await flow.async_step_hardware()
+            self.assertEqual(form.call_args.kwargs["errors"], {"base": "hardware_configuration_failed"})
+        self.coordinator.data = {}
+        with self.assertRaisesRegex(ValueError, "5.1"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        with patch.object(flow, "async_show_menu", return_value={}) as menu:
+            await flow.async_step_hardware()
+            self.assertNotIn("hardware", menu.call_args.kwargs["menu_options"])
+        self.coordinator.async_post_http.assert_not_awaited()
 
 
 if __name__ == "__main__":
