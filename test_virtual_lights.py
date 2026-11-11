@@ -24,6 +24,8 @@ from custom_components.esp_rgbww.light import (
 )
 from custom_components.esp_rgbww.options_flow import LightinatorOptionsFlow
 from custom_components.esp_rgbww.rpc import RpcError
+from custom_components.esp_rgbww.sensor import LightinatorSensor, SENSORS
+from homeassistant.components.sensor import SensorStateClass
 from custom_components.esp_rgbww.virtual_lights import (
     CHANNELS,
     CONF_LEGACY_LIGHT_ID,
@@ -1183,6 +1185,108 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
             await flow.async_step_hardware()
             self.assertNotIn("hardware", menu.call_args.kwargs["menu_options"])
         self.coordinator.async_post_http.assert_not_awaited()
+
+    async def test_uptime_is_a_duration_measurement_and_can_reset(self):
+        description = next(sensor for sensor in SENSORS if sensor.key == "uptime")
+        sensor = LightinatorSensor(self.coordinator, self.entry, description)
+        self.assertEqual(sensor.state_class, SensorStateClass.MEASUREMENT)
+        for uptime in (30290, 30289, 0, 10):
+            self.coordinator.data = {"info": {"runtime": {"uptime": uptime}}}
+            self.assertEqual(sensor.native_value, uptime)
+
+    async def test_info_poll_cannot_overwrite_newer_runtime_notification(self):
+        self.coordinator.data = {"info": {"runtime": {"uptime": 100}}}
+        self.coordinator._rpc_request.side_effect = [
+            {"app": {"git_version": "V5.0"}, "runtime": {"uptime": 100}},
+            {"hsv": {"v": 0}},
+        ]
+        self.coordinator._config = {}
+
+        async def read_data(path):
+            self.assertEqual(path, "/data")
+            await self.coordinator._handle_ws_message(
+                {"method": "runtime_info", "params": {"uptime": 101, "heap_free": 10000}}
+            )
+            return {}
+
+        self.coordinator._get.side_effect = read_data
+        data = await self.coordinator._async_update_data()
+        self.assertEqual(data["info"]["runtime"], {"uptime": 101, "heap_free": 10000})
+
+    async def test_info_refresh_preserves_newer_runtime_even_after_reboot(self):
+        self.coordinator.data = {"info": {"runtime": {"uptime": 30290}}}
+
+        async def read_info(*args):
+            await self.coordinator._handle_ws_message(
+                {"method": "runtime_info", "params": {"uptime": 1}}
+            )
+            return {"app": {"git_version": "V5.1"}, "runtime": {"uptime": 30289}}
+
+        self.coordinator._rpc_request.side_effect = read_info
+        info = await self.coordinator.async_refresh_info()
+        self.assertEqual(info["runtime"]["uptime"], 1)
+        self.assertEqual(self.coordinator.data["info"]["runtime"]["uptime"], 1)
+
+    async def test_rpc_timeouts_identify_connection_and_method(self):
+        del self.coordinator._rpc_request
+
+        async def connection_timeout(awaitable, timeout):
+            awaitable.close()
+            raise TimeoutError()
+
+        with patch("custom_components.esp_rgbww.coordinator.asyncio.wait_for",
+                   side_effect=connection_timeout):
+            with self.assertRaisesRegex(TimeoutError, "authenticated WebSocket.*controller:80.*info"):
+                await self.coordinator._rpc_request("info", {})
+        ws = MagicMock()
+        ws.closed = False
+        ws.send_json = AsyncMock()
+        self.coordinator._ws = ws
+        with patch("custom_components.esp_rgbww.coordinator.asyncio.wait_for",
+                   side_effect=TimeoutError):
+            with self.assertRaisesRegex(TimeoutError, "JSON-RPC 'color'.*request 1"):
+                await self.coordinator._rpc_request("color", {}, wait_ready=False)
+        self.assertEqual(self.coordinator._pending, {})
+        ws.send_json.assert_awaited_once()
+
+    async def test_blank_transport_error_has_nonempty_coordinator_context(self):
+        self.coordinator._rpc_request.side_effect = TimeoutError()
+        with self.assertRaisesRegex(UpdateFailed, "controller:80: TimeoutError"):
+            await self.coordinator._async_update_data()
+
+    async def test_closed_reader_reports_close_code_and_transport_exception(self):
+        ws = MagicMock()
+        ws.__aiter__.return_value = []
+        ws.close_code = 1006
+        ws.exception.return_value = ConnectionError("Connection reset by peer")
+        pending = asyncio.get_running_loop().create_future()
+        self.coordinator._pending[1] = pending
+        await self.coordinator._listen_ws(ws)
+        with self.assertRaisesRegex(ConnectionError, "controller:80.*1006.*Connection reset"):
+            await pending
+        self.coordinator._pending.clear()
+
+    async def test_websocket_transport_failure_reconnects_and_resubscribes(self):
+        ws = MagicMock()
+        self.coordinator._session.ws_connect.return_value.__aenter__.return_value = ws
+        self.coordinator._rpc_request.return_value = {"subscribed": True, "channel": "lights"}
+        connections = 0
+
+        async def listen(socket):
+            nonlocal connections
+            connections += 1
+            if connections == 1:
+                raise ConnectionError("Connection reset by peer")
+            self.coordinator._closing = True
+
+        with patch.object(self.coordinator, "_listen_ws", side_effect=listen), \
+                patch("custom_components.esp_rgbww.coordinator.asyncio.sleep", new_callable=AsyncMock):
+            await self.coordinator.async_connect_ws()
+        self.assertEqual(connections, 2)
+        self.assertEqual(self.coordinator.ws_generation, 2)
+        self.assertEqual(self.coordinator._rpc_request.await_count, 4)
+        self.assertFalse(self.coordinator.ws_connected)
+        self.assertFalse(self.coordinator._ws_ready.is_set())
 
 
 if __name__ == "__main__":

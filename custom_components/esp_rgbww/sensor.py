@@ -40,7 +40,7 @@ SENSORS: tuple[LightinatorSensorDescription, ...] = (
         info_path=("runtime", "uptime"),
         name="Uptime",
         device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTime.SECONDS,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),

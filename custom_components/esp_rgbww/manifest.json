@@ -1,10 +1,11 @@
 {
   "domain": "esp_rgbww",
   "name": "Lightinator (ESP RGBWW)",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "codeowners": ["@pljakobs"],
   "config_flow": true,
   "documentation": "https://github.com/pljakobs/esp_rgbww_firmware",
+  "issue_tracker": "https://github.com/pljakobs/Lightinator_HA_module/issues",
   "integration_type": "hub",
   "iot_class": "local_push",
   "requirements": ["aiohttp>=3.9.0"],

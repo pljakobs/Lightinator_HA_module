@@ -24,6 +24,12 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 - **Animation controls** — Stop, Skip, Pause, Resume buttons
 - **Diagnostic sensors** — uptime, free heap, WiFi IP
 
+Uptime is a duration measurement, not an accumulated total; controller restarts
+can reset it. Runtime notifications received during an info refresh take
+precedence over that older poll. Communication errors identify the controller,
+RPC timeout stage, and WebSocket close code/error where available. The socket
+reconnects with backoff; failed commands are not replayed automatically.
+
 ## Installation
 
 ### HACS (recommended)

@@ -73,6 +73,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._light_transition_until: dict[str, float] = {}
         self._light_updates_subscribed = False
         self._light_configuration_pending = False
+        self._runtime_version = 0
         self._light_refresh_unsubs: dict[str, Callable[[], None]] = {}
         self._config: dict[str, Any] | None = None
         self._config_lock = asyncio.Lock()
@@ -854,10 +855,21 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_refresh_info(self) -> dict[str, Any]:
         """Read fresh firmware info over RPC after a reconnect."""
+        runtime_version = self._runtime_version
         info = await self._rpc_request("info", {"sparse": "false"})
+        info = self._preserve_newer_runtime(info, runtime_version)
         new_data = dict(self.data or {})
         new_data["info"] = info
         self.async_set_updated_data(new_data)
+        return info
+
+    def _preserve_newer_runtime(
+        self, info: dict[str, Any], version: int
+    ) -> dict[str, Any]:
+        if version != self._runtime_version:
+            runtime = (self.data or {}).get("info", {}).get("runtime")
+            if isinstance(runtime, dict):
+                return {**info, "runtime": runtime}
         return info
 
     async def async_wait_connected(self) -> None:
@@ -872,6 +884,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fetch RPC state plus REST-only presets and groups."""
         try:
             versions = dict(self._light_command_versions)
+            runtime_version = self._runtime_version
             if self.virtual_lights is not None and time.monotonic() < self._next_metadata_refresh:
                 lights = self.virtual_lights
                 states = await self._read_virtual_light_states(lights)
@@ -902,7 +915,10 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             async with self._data_lock:
                 data_resp = await self._get("/data")
         except (aiohttp.ClientError, RpcError, asyncio.TimeoutError, ConnectionError, ValueError) as err:
-            raise UpdateFailed(f"Error communicating with Lightinator: {err}") from err
+            detail = str(err) or type(err).__name__
+            raise UpdateFailed(
+                f"Error communicating with Lightinator at {self._host}:{self._port}: {detail}"
+            ) from err
 
         presets = (
             data_resp.get("presets", [])
@@ -948,7 +964,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "raw": color_resp.get("raw", current.get("raw", {}) if lights is None else {}),
             "lights": lights,
             "light_states": light_states,
-            "info": info_resp,
+            "info": self._preserve_newer_runtime(info_resp, runtime_version),
             "config": self._safe_config_view(config),
             "presets": presets,
             "controller_icon": controller_icon,
@@ -969,7 +985,12 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, Any]:
         """Send a JSON-RPC request over the active WebSocket."""
         if wait_ready:
-            await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
+            try:
+                await asyncio.wait_for(self._ws_ready.wait(), timeout=10)
+            except TimeoutError as err:
+                raise TimeoutError(
+                    f"Timed out waiting for authenticated WebSocket at {self._host}:{self._port} for '{method}'"
+                ) from err
         ws = self._ws
         if ws is None or ws.closed:
             raise ConnectionError("Lightinator WebSocket is not connected")
@@ -988,7 +1009,12 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "params": params,
                     }
                 )
-            response = await asyncio.wait_for(future, timeout=10)
+            try:
+                response = await asyncio.wait_for(future, timeout=10)
+            except TimeoutError as err:
+                raise TimeoutError(
+                    f"Timed out waiting for JSON-RPC '{method}' response (request {request_id})"
+                ) from err
         finally:
             self._pending.pop(request_id, None)
 
@@ -1063,7 +1089,9 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
             except Exception as err:
                 _LOGGER.debug(
-                    "Lightinator WS error (%s), retrying in %ds", err, backoff
+                    "Lightinator WS error at %s:%s (%s: %s), retrying in %ds",
+                    self._host, self._port, type(err).__name__, err, backoff,
+                    exc_info=True,
                 )
             finally:
                 self._ws_ready.clear()
@@ -1123,7 +1151,11 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 elif isinstance(payload.get("method"), str):
                     await self._handle_ws_message(payload)
         finally:
-            self._fail_pending(ConnectionError("Lightinator WebSocket reader stopped"))
+            detail = ws.exception()
+            self._fail_pending(ConnectionError(
+                f"Lightinator WebSocket reader stopped at {self._host}:{self._port} "
+                f"(close code {ws.close_code}, error: {detail!r})"
+            ))
 
     def _fail_pending(self, error: Exception) -> None:
         for future in self._pending.values():
@@ -1194,6 +1226,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.async_create_task(self._refresh_color_state())
 
         elif method == "runtime_info":
+            self._runtime_version += 1
             new_data = dict(self.data or {})
             new_data["runtime"] = params
             info = dict(new_data.get("info", {}))
