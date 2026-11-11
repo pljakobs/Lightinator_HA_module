@@ -162,6 +162,11 @@ to the legacy 5.0 path.
 
 ## Development tests
 
+The GitHub **Release** workflow runs on pushes to `master` and version tags.
+It can also be started manually using **Actions -> Release -> Run workflow**.
+It publishes the version in the integration manifest; existing version tags
+must point to the selected commit.
+
 With Home Assistant installed in a Python environment, run:
 
 ```sh
