@@ -181,6 +181,7 @@
         }
       },
     "abort": {
+      "controller_not_loaded": "This controller is not loaded. Check its integration setup error, host address and credentials, then reload the entry and try Configure again.",
       "no_lights": "No lights are configured on this controller."
     },
     "error": {

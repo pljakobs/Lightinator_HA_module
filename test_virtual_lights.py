@@ -2,7 +2,6 @@
 
 import asyncio
 import copy
-import math
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -12,6 +11,7 @@ from homeassistant.components.light import ColorMode, valid_supported_color_mode
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.data_entry_flow import AbortFlow
 
 from custom_components.esp_rgbww import _register_services
 from custom_components.esp_rgbww.coordinator import LightinatorCoordinator
@@ -45,6 +45,29 @@ def configuration(*types):
 
 
 class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_configure_unloaded_entry_aborts_instead_of_key_error(self):
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        for data in ({}, {"esp_rgbww": {}}):
+            self.hass.data.pop("esp_rgbww", None)
+            self.hass.data.update(data)
+            with self.assertRaises(AbortFlow) as raised:
+                await flow.async_step_init()
+            self.assertEqual(raised.exception.reason, "controller_not_loaded")
+
+    async def test_configure_entry_unloaded_while_form_is_open_aborts(self):
+        self.install("SINGLE")
+        flow = LightinatorOptionsFlow(self.entry)
+        flow.hass = self.hass
+        with patch.object(flow, "async_show_menu", return_value={}):
+            await flow.async_step_init()
+        del self.hass.data["esp_rgbww"][self.entry.entry_id]
+        for step in (flow.async_step_hardware, flow.async_step_create_light,
+                     flow.async_step_delete_light, flow.async_step_color):
+            with self.assertRaises(AbortFlow) as raised:
+                await step()
+            self.assertEqual(raised.exception.reason, "controller_not_loaded")
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -91,7 +114,7 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
                 discover_lights(config, "V5.1.0")
 
     def test_wire_units_and_mode_replacement(self):
-        state = decode_color({"hsv": {"h": math.pi, "s": 0.5, "v": 0.25, "ct": 3200}})
+        state = decode_color({"hsv": {"h": 180, "s": 50, "v": 25, "ct": 3200}})
         self.assertEqual(state, {"hsv": {"h": 180, "s": 50, "v": 25, "ct": 3200}})
         self.assertEqual(decode_color({"raw": [512, 0]}), {"raw": [512, 0]})
         with self.assertRaises(ValueError):
@@ -131,7 +154,7 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator._rpc_request.side_effect = [
             {"app": {"git_version": "V5.1.0"}},
             {"raw": [1023]},
-            {"hsv": {"h": math.pi, "s": 0, "v": 0.5, "ct": 4000}},
+            {"hsv": {"h": 180, "s": 0, "v": 50, "ct": 4000}},
         ]
         data = await self.coordinator._async_update_data()
         self.assertEqual(data["light_states"]["uuid-0"], {"raw": [1023]})
@@ -194,6 +217,17 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(warm.brightness, 1)
         self.assertTrue(primary.is_on)
         self.assertTrue(warm.is_on)
+
+    def test_hsv_readback_percentages(self):
+        for profile in ("SINGLE", "WWCW", "RGB"):
+            for value in (0, 0.25, 12.414467, 32.453568, 100):
+                with self.subTest(profile=profile, value=value):
+                    self.install(profile)
+                    self.coordinator.data["light_states"]["uuid-0"] = decode_color(
+                        {"hsv": {"h": 180, "s": 50, "v": value, "ct": 3200}}
+                    )
+                    expected = max(1, round(value * 255 / 100)) if value else 0
+                    self.assertEqual(self.entity().brightness, expected)
 
     async def test_tw_ct_brightness_and_independent_raw_channels(self):
         lights = self.install("WWCW")

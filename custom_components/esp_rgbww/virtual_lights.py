@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import degrees
 from typing import Any
 
 CHANNELS = {
@@ -82,7 +81,7 @@ def discover_lights(
 
 
 def decode_color(color: dict[str, Any]) -> dict[str, Any]:
-    """Convert 5.1 wire HSV radians/fractions to command degrees/percent."""
+    """Decode 5.1 HSV degrees/percent or RAW state without changing units."""
     if not isinstance(color, dict):
         raise ValueError("Invalid light state")
     hsv = color.get("hsv")
@@ -91,9 +90,9 @@ def decode_color(color: dict[str, Any]) -> dict[str, Any]:
                or isinstance(hsv.get(key, 0), bool) for key in ("h", "s", "v", "ct")):
             raise ValueError("Invalid HSV light state")
         return {"hsv": {
-            "h": degrees(hsv.get("h", 0)) % 360,
-            "s": hsv.get("s", 0) * 100,
-            "v": hsv.get("v", 0) * 100,
+            "h": hsv.get("h", 0),
+            "s": hsv.get("s", 0),
+            "v": hsv.get("v", 0),
             "ct": hsv.get("ct", 0),
         }}
     raw = color.get("raw")

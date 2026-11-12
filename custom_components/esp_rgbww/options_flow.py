@@ -12,6 +12,7 @@ import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectSelector,
@@ -53,7 +54,14 @@ class LightinatorOptionsFlow(OptionsFlow):
         self._boards: dict[str, dict[str, Any]] = {}
 
     def _coordinator(self) -> LightinatorCoordinator:
-        return self.hass.data[DOMAIN][self._entry.entry_id]
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        if coordinator is None:
+            _LOGGER.warning(
+                "Cannot configure Lightinator entry %s: controller setup is not loaded",
+                self._entry.entry_id,
+            )
+            raise AbortFlow("controller_not_loaded")
+        return coordinator
 
     async def _config(self) -> dict[str, Any]:
         return await self._coordinator().async_get_config(force_refresh=True)

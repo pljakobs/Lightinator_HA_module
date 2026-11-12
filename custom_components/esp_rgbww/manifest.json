@@ -1,9 +1,10 @@
 {
   "domain": "esp_rgbww",
   "name": "Lightinator (ESP RGBWW)",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "codeowners": ["@pljakobs"],
   "config_flow": true,
+  "dependencies": ["frontend", "http", "websocket_api"],
   "documentation": "https://github.com/pljakobs/esp_rgbww_firmware",
   "issue_tracker": "https://github.com/pljakobs/Lightinator_HA_module/issues",
   "integration_type": "hub",

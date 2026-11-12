@@ -21,6 +21,14 @@ from .virtual_lights import CHANNELS
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Set up the central controller configuration panel."""
+    from .panel import async_setup_panel
+
+    await async_setup_panel(hass)
+    return True
+
+
 def _get_coordinators_for_call(
     hass: HomeAssistant, call: ServiceCall
 ) -> list[LightinatorCoordinator]:

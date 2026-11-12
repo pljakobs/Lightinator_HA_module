@@ -51,6 +51,10 @@ You can also add a device manually via **Settings → Devices & Services → Add
 Use the integration's **Configure** action for color and network settings. Static
 IP, netmask, gateway, and DHCP are submitted together. Some changes reboot the
 controller; its stable `/info` device ID keeps the HA device identity unchanged.
+Configure requires a successfully loaded controller entry. If setup is still
+retrying or the entry has been unloaded, it reports this explicitly instead of
+opening an unusable settings form. Check the entry's setup error and reload it
+after correcting connectivity or credentials.
 Use **Controller icon** in Configure to choose a locally available controller
 icon; the selected sprite ID is saved to the controller's app-data.
 On 5.1, **Create light** in Configure lets you choose a name, output type and
@@ -156,15 +160,30 @@ single-channel/WWCW RAW state as a controller preset therefore reports an error;
 use an HA scene instead. HSV and named RGB RAW presets retain their existing
 formats.
 
+## Controller configuration page
+
+Administrators can open **Lightinator** in the Home Assistant sidebar for a
+central overview of all configured controllers. Select a controller to see its
+connection status, firmware, configured lights, GPIO assignments and default
+light. Add or delete 5.1 lights directly from that inventory. Controller-wide
+board/PWM, network, firmware and icon settings are grouped below the lights.
+Firmware 5.0 retains its single-light color settings without virtual-light actions.
+
+The page uses the same validated options flows as **Configure** in Devices &
+services, including confirmation and concurrent-edit checks. Existing light
+entities and automations are unchanged. The panel and its controller-data API
+are admin-only; the overview does not export passwords. Refresh updates the
+inventory, and it refreshes automatically every 30 seconds outside an open form.
+Restart Home Assistant after installing the integration to register the sidebar.
+
 ## Colour Temperature
 
 The firmware's `hsv.ct` value is a Kelvin temperature, not a 0–100 percentage.
 The integration sends and reads it directly. Home Assistant displays the light
 over its supported range of 2703–6536 K and handles Kelvin/mired conversion.
 On 5.1 the range comes from each light's configured warm/cool temperatures.
-HSV readback radians and 0–1 saturation/brightness are converted to degrees and
-percent before use in HA or subsequent commands. This conversion is not applied
-to the legacy 5.0 path.
+Both 5.0 and 5.1 HSV readback use hue in degrees and saturation/brightness in
+percent, matching command units. No additional HSV scaling is applied.
 
 ## Development tests
 
@@ -176,11 +195,13 @@ must point to the selected commit.
 With Home Assistant installed in a Python environment, run:
 
 ```sh
-python -m unittest -v test_firmware_api test_virtual_lights
+python -m unittest -v test_firmware_api test_virtual_lights test_panel
 ```
 
 The virtual-light tests exercise discovery, profile controls, UUID migration,
 per-light command/state isolation and unchanged 5.0 setup/commands.
+Panel tests cover controller inventories, unloaded entries, admin access,
+error reporting and exclusion of controller credentials.
 
 ## License
 
