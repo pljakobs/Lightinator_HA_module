@@ -18,6 +18,8 @@ def _preset_color(
     presets: list[dict[str, Any]],
     seen_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+    if preset.get("raw_channels"):
+        return None
     color = preset.get("color")
     if not isinstance(color, dict):
         color = preset
@@ -37,7 +39,8 @@ def _preset_color(
             if direct:
                 return mode, direct, container
 
-    preset_id = color.get("id")
+    reference = color.get("Preset", color)
+    preset_id = reference.get("id") if isinstance(reference, dict) else None
     if not isinstance(preset_id, str) or preset_id in seen_ids:
         return None
 
@@ -57,7 +60,7 @@ def _preset_color(
         return None
     mode, values, options = resolved
     alias_options = {
-        key: value for key, value in color.items() if key != "id"
+        key: value for key, value in color.items() if key not in {"id", "Preset"}
     }
     return mode, values, {**options, **alias_options}
 
@@ -70,6 +73,7 @@ def preset_names(presets: list[dict[str, Any]]) -> list[str]:
         if isinstance(preset, dict)
         and isinstance(preset.get("name"), str)
         and preset["name"]
+        and not preset.get("raw_channels")
         and _preset_color(preset, presets) is not None
     ]
 
@@ -200,13 +204,31 @@ def preset_command(
     default_command: str,
     default_transition_ms: int | None = None,
     transition_ms: int | None = None,
+    light_type: str | None = None,
 ) -> dict[str, Any] | None:
     """Build the firmware color command for one data preset."""
+    indexed = preset.get("raw_channels")
+    if isinstance(indexed, list) and indexed:
+        from .virtual_lights import CHANNELS
+        if (
+            light_type != preset.get("light_type")
+            or len(indexed) != len(CHANNELS.get(light_type, ()))
+            or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 1023
+                   for value in indexed)
+        ):
+            raise ValueError("This RAW preset requires a matching light profile")
+        return {"cmd": default_command, "raw": list(indexed)}
     resolved = _preset_color(preset, presets)
     if resolved is None:
         return None
 
     mode, color, options = resolved
+    if mode == "raw" and light_type is not None and not light_type.startswith("RGB"):
+        from .virtual_lights import CHANNELS
+        channels = CHANNELS.get(light_type)
+        if not channels or "output" in channels:
+            raise ValueError("Named RAW preset is incompatible with this light")
+        color = [color.get(channel, 0) for channel in channels]
     command: dict[str, Any] = {
         "cmd": options.get("cmd") or default_command,
         mode: color,
@@ -223,3 +245,66 @@ def preset_command(
         command["t"] = default_transition_ms
 
     return command
+
+
+def is_light_favorite(preset: dict[str, Any], light: Any = None) -> bool:
+    """Keep 5.0 favorites; explicit UUID overrides never leak to other lights."""
+    if light is None:
+        return preset.get("favorite") is True
+    for override in preset.get("light_favorites", []):
+        if isinstance(override, dict) and override.get("light_id") == light.id:
+            return override.get("favorite") is True
+    return light.is_default and preset.get("favorite") is True
+
+
+def with_light_favorite(
+    preset: dict[str, Any], light: Any, favorite: bool
+) -> dict[str, Any]:
+    """Update one light's membership, retaining all other preset data."""
+    if light is None:
+        return {**preset, "favorite": favorite}
+    return {**preset, "light_favorites": [
+        *(item for item in preset.get("light_favorites", [])
+          if item.get("light_id") != light.id),
+        {"light_id": light.id, "favorite": favorite},
+    ]}
+
+
+def light_preset_swatches(
+    presets: list[dict[str, Any]], light: Any = None,
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Dashboard descriptors use IDs, not lossy color translations, when applied."""
+    result = []
+    for preset in presets:
+        if not isinstance(preset, dict) or not preset.get("id") or not is_light_favorite(preset, light):
+            continue
+        try:
+            command = preset_command(
+                preset, presets, default_command="solid",
+                light_type=light.type if light else None,
+            )
+        except ValueError:
+            continue
+        if command is None:
+            continue
+        import colorsys
+        color = command.get("hsv")
+        if isinstance(color, dict):
+            h, s, v = (float(color.get(key, 0)) for key in ("h", "s", "v"))
+            rgb = [round(channel * 255) for channel in colorsys.hsv_to_rgb(h / 360, s / 100, v / 100)]
+            if color.get("ct", 0) > 0 and s == 0:
+                rgb = [round(channel * v / 100) for channel in color_temperature_to_rgb(color["ct"])]
+        else:
+            raw = command.get("raw")
+            if isinstance(raw, list):
+                level = max(raw, default=0) / 1023
+                rgb = [round(level * 255)] * 3
+            else:
+                rgb = [round(raw.get(channel, 0) * 255 / 1023) for channel in ("r", "g", "b")]
+                rgb = _add_white_to_rgb(rgb, _raw_white_kelvin(raw, config or {}), raw)
+        result.append({
+            "id": preset["id"], "name": str(preset.get("name") or preset["id"]),
+            "rgb": [max(0, min(255, value)) for value in rgb],
+        })
+    return result

@@ -12,6 +12,8 @@ from homeassistant.components import panel_custom, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 
 from .const import CONF_DEVICE_NAME, DOMAIN
 
@@ -74,12 +76,56 @@ async def websocket_controllers(
     connection.send_result(msg["id"], controllers)
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "esp_rgbww/preset",
+    vol.Required("entity_id"): str,
+    vol.Required("preset_id"): str,
+    vol.Required("action"): vol.In(["apply", "favorite"]),
+    vol.Optional("favorite"): bool,
+})
+@websocket_api.async_response
+async def websocket_preset(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Operate only on an authorized primary light, never a caller-supplied host."""
+    entity_id = msg["entity_id"]
+    if not connection.user or not connection.user.permissions.check_entity(entity_id, POLICY_CONTROL):
+        connection.send_error(msg["id"], "unauthorized", "Light control permission required")
+        return
+    entity = er.async_get(hass).async_get(entity_id)
+    if entity is None or entity.platform != DOMAIN or entity.domain != "light":
+        connection.send_error(msg["id"], "invalid_target", "Select a Lightinator primary light")
+        return
+    coordinator = hass.data.get(DOMAIN, {}).get(entity.config_entry_id)
+    if coordinator is None or not coordinator.last_update_success:
+        connection.send_error(msg["id"], "controller_unavailable", "Controller is unavailable")
+        return
+    try:
+        light_id = coordinator.preset_entity_target(entity.unique_id)
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_target", str(err))
+        return
+    try:
+        if msg["action"] == "apply":
+            await coordinator.async_apply_preset(msg["preset_id"], light_id)
+        else:
+            if "favorite" not in msg:
+                raise ValueError("favorite is required for membership changes")
+            await coordinator.async_set_preset_favorite(msg["preset_id"], msg["favorite"], light_id)
+    except (aiohttp.ClientError, TimeoutError, ValueError, HomeAssistantError) as err:
+        _LOGGER.warning("Lightinator preset operation failed for %s: %s", entity_id, err)
+        connection.send_error(msg["id"], "preset_failed", str(err))
+        return
+    connection.send_result(msg["id"])
+
+
 async def async_setup_panel(hass: HomeAssistant) -> None:
     """Register one panel and its authenticated overview endpoint."""
     await hass.http.async_register_static_paths([
         StaticPathConfig(_URL, str(Path(__file__).parent / "frontend"), False)
     ])
     websocket_api.async_register_command(hass, websocket_controllers)
+    websocket_api.async_register_command(hass, websocket_preset)
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path="lightinator",

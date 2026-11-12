@@ -35,7 +35,7 @@ from .const import (
     configured_color_temperature_range,
 )
 from .coordinator import LightinatorCoordinator
-from .presets import favorite_preset_colors
+from .presets import favorite_preset_colors, is_light_favorite, light_preset_swatches
 from .virtual_lights import (
     CHANNEL_LABELS,
     CONF_LEGACY_LIGHT_ID,
@@ -256,8 +256,18 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
             return
 
         coordinator_data = self.coordinator.data or {}
+        light = None
+        if hasattr(self, "_light_id"):
+            light = (self.coordinator.virtual_lights or {}).get(self._light_id)
+            if light is None:
+                return
+        presets = [
+            {**preset, "favorite": is_light_favorite(preset, light)}
+            for preset in coordinator_data.get("presets", [])
+            if not preset.get("raw_channels")
+        ]
         firmware_colors = favorite_preset_colors(
-            coordinator_data.get("presets", []),
+            presets,
             coordinator_data.get("config", {}),
         )
         if (
@@ -275,6 +285,21 @@ class LightinatorMainLight(CoordinatorEntity[LightinatorCoordinator], LightEntit
             "light",
             entity_options,
         )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        light_id = getattr(self, "_light_id", None)
+        light = (self.coordinator.virtual_lights or {}).get(light_id)
+        # A removed or channel-only entity must not expose another light's swatches.
+        if hasattr(self, "_channel") or (light_id is not None and light is None):
+            return {"light_id": light_id} if light_id else {}
+        return {
+            **({"light_id": light_id} if light_id else {}),
+            "lightinator_presets": light_preset_swatches(
+                data.get("presets", []), light, data.get("config", {}),
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Commands
@@ -360,7 +385,6 @@ class LightinatorVirtualLight(LightinatorMainLight):
     ) -> None:
         super().__init__(coordinator, entry)
         self._light_id = light.id
-        self._attr_extra_state_attributes = {"light_id": light.id}
         self._initial_light = light
         self._last_on_raw: list[int] = []
         self._attr_unique_id = (

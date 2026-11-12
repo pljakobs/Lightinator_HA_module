@@ -21,7 +21,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN, UPDATE_INTERVAL
 from .rpc import RpcAuthenticationError, RpcError, authentication_hash
-from .virtual_lights import CHANNELS, VirtualLight, decode_color, discover_lights
+from .virtual_lights import CHANNELS, CONF_LEGACY_LIGHT_ID, VirtualLight, decode_color, discover_lights
+from .presets import preset_command, with_light_favorite
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -458,6 +459,26 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """None denotes the unchanged 5.0 single-light interface."""
         return (self.data or {}).get("lights")
 
+    @property
+    def controller_id(self) -> str:
+        """Stable controller identity used by primary entity unique IDs."""
+        return str(self._entry.data[CONF_CHIP_ID])
+
+    def preset_entity_target(self, unique_id: str) -> str | None:
+        """Bind swatch actions to the registry identity, not mutable state attributes."""
+        if self.virtual_lights is None:
+            if unique_id == self.controller_id:
+                return None
+        else:
+            if unique_id == self.controller_id:
+                light_id = self._entry.data.get(CONF_LEGACY_LIGHT_ID)
+                if light_id is not None:
+                    return self.light(light_id).id
+            for light in self.virtual_lights.values():
+                if unique_id == f"{self.controller_id}_{light.id}":
+                    return light.id
+        raise ValueError("Select a configured primary light, not a RAW channel")
+
     def light(self, light_id: str) -> VirtualLight:
         """Resolve a UUID at command time; never fall back to the default."""
         light = (self.virtual_lights or {}).get(light_id)
@@ -656,6 +677,64 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """GET and parse JSON from a device endpoint."""
         return await self._get(path)
 
+    async def async_apply_preset(self, preset_id: str, light_id: str | None = None) -> None:
+        """Resolve a controller-local preset and route it to a stable UUID."""
+        light = self.light(light_id) if light_id is not None else None
+        if self.virtual_lights is not None and light is None:
+            raise ValueError("Select an explicit virtual light")
+        data = await self._get("/data")
+        if not isinstance(data, dict) or not isinstance(data.get("presets"), list):
+            raise ValueError("Controller returned invalid preset data")
+        presets = data["presets"]
+        if any(not isinstance(item, dict) for item in presets):
+            raise ValueError("Controller returned invalid preset data")
+        preset = next((item for item in presets if item.get("id") == preset_id), None)
+        if preset is None:
+            raise ValueError("Preset no longer exists")
+        command = preset_command(
+            preset, presets, default_command="solid",
+            light_type=light.type if light else None,
+        )
+        if command is None:
+            raise ValueError("Preset has no supported color")
+        await self.post("/color", command, light_id=light_id)
+
+    async def async_set_preset_favorite(
+        self, preset_id: str, favorite: bool, light_id: str | None = None,
+    ) -> None:
+        """Persist one light's favorite override with explicit firmware readback."""
+        light = self.light(light_id) if light_id is not None else None
+        if self.virtual_lights is not None and light is None:
+            raise ValueError("Select an explicit virtual light")
+        if light and (self.data or {}).get("info", {}).get("rgbww", {}).get("preset_light_favorites") is not True:
+            raise ValueError("Update the 5.1 firmware to store per-light favorites")
+        async with self._data_lock:
+            data = await self._get("/data")
+            if (
+                not isinstance(data, dict) or not isinstance(data.get("presets"), list)
+                or any(not isinstance(item, dict) for item in data["presets"])
+            ):
+                raise ValueError("Controller returned invalid preset data")
+            preset = next((item for item in data["presets"] if item.get("id") == preset_id), None)
+            if preset is None:
+                raise ValueError("Preset no longer exists")
+            updated = with_light_favorite(preset, light, favorite)
+            updated["ts"] = int(time.time())
+            response = await self.async_post_http("/data", {f"presets[id={preset_id}]": updated})
+            if isinstance(response, dict) and response.get("success") is False:
+                raise ValueError("Controller rejected the favorite update")
+            readback = await self._get("/data")
+            if (
+                not isinstance(readback, dict) or not isinstance(readback.get("presets"), list)
+                or any(not isinstance(item, dict) for item in readback["presets"])
+            ):
+                raise ValueError("Controller returned invalid preset readback")
+            saved = next((item for item in readback["presets"] if item.get("id") == preset_id), None)
+            field = "light_favorites" if light else "favorite"
+            if saved is None or saved.get(field) != updated.get(field):
+                raise ValueError("Favorite readback mismatch; controller firmware may be too old")
+            self.async_set_updated_data({**(self.data or {}), "presets": readback["presets"]})
+
     async def save_current_preset(
         self, name: str, color_mode: str, favorite: bool | None = None,
         *, light_id: str | None = None,
@@ -665,16 +744,27 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError("color_mode must be 'hsv' or 'raw'")
 
         state = self.data or {}
+        light = None
+        if self.virtual_lights is not None and light_id is None:
+            light_id = next((item.id for item in self.virtual_lights.values() if item.is_default), None)
+            if light_id is None:
+                raise ValueError("No default light is configured")
         if light_id is not None:
-            self.light(light_id)
+            light = self.light(light_id)
             state = state.get("light_states", {}).get(light_id, {})
         current_color = state.get(color_mode)
-        if isinstance(current_color, list):
-            raise ValueError(
-                "The firmware preset store does not support indexed RAW colors; "
-                "use an HA scene for single-channel/tunable-white RAW state"
-            )
-        if not isinstance(current_color, dict) or not current_color:
+        indexed = isinstance(current_color, list)
+        if light and (indexed or favorite is not None) and (
+            (self.data or {}).get("info", {}).get("rgbww", {}).get("preset_light_favorites") is not True
+        ):
+            raise ValueError("Update the 5.1 firmware to store per-light favorites and indexed RAW presets")
+        if indexed and (
+            light is None or len(current_color) != len(light.channels)
+            or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 1023
+                   for value in current_color)
+        ):
+            raise ValueError("Invalid indexed RAW color for this light")
+        if not isinstance(current_color, (dict, list)) or not current_color:
             raise ValueError(f"Current {color_mode} color is not available")
 
         color_fields = (
@@ -682,12 +772,12 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if color_mode == "hsv"
             else ("r", "g", "b", "ww", "cw")
         )
-        color_values = {
+        color_values = {} if indexed else {
             key: current_color[key]
             for key in color_fields
             if key in current_color and current_color[key] is not None
         }
-        if not color_values:
+        if not indexed and not color_values:
             raise ValueError(f"Current {color_mode} color is empty")
 
         async with self._data_lock:
@@ -699,7 +789,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not isinstance(presets, list):
                 raise ValueError("Controller /data presets field is not a list")
 
-            now_ms = int(time.time() * 1000)
+            now_ts = int(time.time())
             preset_index = next(
                 (
                     index
@@ -714,12 +804,13 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 preset: dict[str, Any] = {
                     "id": f"{chip_id}-{secrets.randbelow(90_000_000) + 10_000_000}",
                     "name": name,
-                    "favorite": favorite if favorite is not None else False,
-                    "ts": now_ms,
+                    "favorite": favorite if light is None and favorite is not None else False,
+                    "ts": now_ts,
                     "icon": "palette",
                     "color": {},
                 }
-                preset["color"][color_mode] = color_values
+                if not indexed:
+                    preset["color"][color_mode] = color_values
                 presets.append(preset)
                 payload = {"presets[]": [preset]}
             else:
@@ -735,13 +826,15 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     }
 
                 color_options.pop("id", None)
+                color_options.pop("Preset", None)
                 color_options.pop("hsv", None)
                 color_options.pop("raw", None)
-                color_options[color_mode] = color_values
+                if not indexed:
+                    color_options[color_mode] = color_values
                 preset["color"] = color_options
                 preset["name"] = name
-                preset["ts"] = now_ms
-                if favorite is not None:
+                preset["ts"] = now_ts
+                if favorite is not None and light is None:
                     preset["favorite"] = favorite
                 presets[preset_index] = preset
                 preset_id = preset.get("id")
@@ -752,6 +845,17 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 payload = {selector: preset}
 
+            if indexed:
+                preset["raw_channels"] = list(current_color)
+                preset["light_type"] = light.type
+            else:
+                preset["raw_channels"] = []
+                preset["light_type"] = ""
+            if light is not None and favorite is not None:
+                preset = with_light_favorite(preset, light, favorite)
+            presets[preset_index if preset_index is not None else len(presets) - 1] = preset
+            payload = {selector: preset} if preset_index is not None else {"presets[]": [preset]}
+
             url = self._base_url() + "/data"
             async with self._session.post(
                 url,
@@ -760,6 +864,34 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 resp.raise_for_status()
+
+            if light and (indexed or favorite is not None):
+                readback = await self._get("/data")
+                if (
+                    not isinstance(readback, dict) or not isinstance(readback.get("presets"), list)
+                    or any(not isinstance(item, dict) for item in readback["presets"])
+                ):
+                    raise ValueError("Controller returned invalid preset readback")
+                stored_presets = readback["presets"]
+                saved = next((item for item in stored_presets if item.get("id") == preset["id"]), None)
+                if saved is None or saved.get("light_favorites", []) != preset.get("light_favorites", []):
+                    raise ValueError("Preset membership readback mismatch")
+                saved_command = preset_command(saved, stored_presets, default_command="solid", light_type=light.type)
+                expected_command = preset_command(
+                    preset, presets, default_command="solid", light_type=light.type
+                )
+                for command in (saved_command, expected_command):
+                    if command is not None:
+                        for mode, fields in (
+                            ("hsv", ("h", "s", "v", "ct")),
+                            ("raw", ("r", "g", "b", "ww", "cw")),
+                        ):
+                            values = command.get(mode)
+                            if isinstance(values, dict):
+                                command[mode] = {field: values.get(field, 0) for field in fields}
+                if saved_command != expected_command:
+                    raise ValueError("Preset color readback mismatch")
+                presets = stored_presets
 
             new_data = dict(self.data or {})
             new_data["presets"] = presets

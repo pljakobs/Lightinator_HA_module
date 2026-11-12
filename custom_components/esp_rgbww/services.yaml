@@ -126,7 +126,7 @@ save_preset:
             - raw
     favorite:
       name: Favorite
-      description: Mark the preset as a favorite (leave empty to preserve its current value).
+      description: Mark as a favorite for the selected 5.1 light UUID, or controller-wide on 5.0. Leave empty to preserve membership.
       selector:
         boolean:
 

@@ -155,10 +155,11 @@ and verify persistent configuration readback. The integration refreshes discover
 after a successful write; new entities appear and deleted entities become
 unavailable without rebinding existing identities. Current 5.1 firmware reloads
 outputs live; older builds may need a controller restart to activate changes.
-The firmware preset store does not support indexed RAW arrays. Saving a
-single-channel/WWCW RAW state as a controller preset therefore reports an error;
-use an HA scene instead. HSV and named RGB RAW presets retain their existing
-formats.
+Saving single-channel/WWCW RAW presets requires firmware advertising the preset
+extension described below; older builds report an upgrade error. HSV and named
+RGB RAW presets retain their existing formats. The legacy controller-level
+preset selector excludes indexed RAW presets; use the per-light swatch card to
+apply those with an exact profile match.
 
 ## Controller configuration page
 
@@ -175,6 +176,50 @@ entities and automations are unchanged. The panel and its controller-data API
 are admin-only; the overview does not export passwords. Refresh updates the
 inventory, and it refreshes automatically every 30 seconds outside an open form.
 Restart Home Assistant after installing the integration to register the sidebar.
+
+## Per-light preset swatch card
+
+Presets stay controller-local; each 5.1 light has its own favourite selections,
+stored against its persistent UUID. Select a light on the web UI colour card,
+open **Presets**, and star the colours to show in Home Assistant. Legacy
+controller favourites appear on the default light until explicitly overridden.
+On 5.0, the existing controller favourites and untargeted commands are unchanged.
+Saving membership or indexed RAW colours requires 5.1 firmware advertising
+`/info.rgbww.preset_light_favorites: true`; older builds report an upgrade error.
+
+After updating the integration and restarting Home Assistant, add this dashboard
+resource under **Settings -> Dashboards -> Resources** (advanced mode), with type
+**JavaScript Module**:
+
+```text
+/esp_rgbww_panel/preset-card.js
+```
+
+Then add a manual dashboard card:
+
+```yaml
+type: custom:lightinator-preset-card
+entity: light.your_lightinator_light
+title: Favourite colours
+```
+
+Use a primary Lightinator light entity, not an optional RAW channel entity.
+The card is available to users with permission to control that entity, not only
+administrators. It uses authenticated HA WebSocket calls; controller credentials
+are never sent to the browser. Errors remain visible in the card.
+
+Each swatch applies the saved preset by ID, preserving brightness, temperature
+and white channels instead of translating the preview colour back into a new HA
+colour command. Indexed RAW presets apply only to matching output profiles.
+Preview colours are approximate, especially for white mixtures. The native HA
+light dialog still receives representable favourite colours without replacing
+user-customized favourites; use the card for exact preset application.
+
+`esp_rgbww.save_preset` accepts `light_id` to save that light's current HSV or RAW
+state. Its `favorite` option changes membership only for that UUID on 5.1.
+The default light is used if omitted. Removing membership leaves the shared
+controller preset intact. Writes read the latest preset and verify membership,
+but do not provide cross-client compare-and-swap or scene deletion tombstones.
 
 ## Colour Temperature
 
@@ -195,7 +240,7 @@ must point to the selected commit.
 With Home Assistant installed in a Python environment, run:
 
 ```sh
-python -m unittest -v test_firmware_api test_virtual_lights test_panel
+python -m unittest -v test_firmware_api test_virtual_lights test_panel test_presets
 ```
 
 The virtual-light tests exercise discovery, profile controls, UUID migration,

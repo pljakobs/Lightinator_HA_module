@@ -793,7 +793,7 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_indexed_raw_preset_is_rejected_before_writing(self):
         self.install("WWCW")
         self.coordinator.data["light_states"]["uuid-0"] = {"raw": [123, 456]}
-        with self.assertRaisesRegex(ValueError, "does not support indexed RAW"):
+        with self.assertRaisesRegex(ValueError, "Update the 5.1 firmware"):
             await self.coordinator.save_current_preset("Warm", "raw", True, light_id="uuid-0")
         self.coordinator._session.post.assert_not_called()
 
@@ -1037,7 +1037,7 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         entities, callbacks, registry = await self.setup_platform()
         old = entities[0]
         self.assertTrue(old.available)
-        self.assertEqual(old.extra_state_attributes, {"light_id": "uuid-0"})
+        self.assertEqual(old.extra_state_attributes, {"light_id": "uuid-0", "lightinator_presets": []})
 
         async def rpc(method, params):
             if method == "info":
@@ -1054,7 +1054,7 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(entities), 4)
             new_id = self.saved_config["hardware"]["configuration"]["lights"][1]["id"]
             self.assertEqual(entities[1].unique_id, f"123_{new_id}")
-            self.assertEqual(entities[1].extra_state_attributes, {"light_id": new_id})
+            self.assertEqual(entities[1].extra_state_attributes, {"light_id": new_id, "lightinator_presets": []})
             self.assertTrue(entities[1].available)
             await self.coordinator.async_manage_light(delete_id="uuid-0", replacement_default=new_id)
             self.assertFalse(old.available)
