@@ -916,6 +916,11 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
                 await self.coordinator.async_manage_light(name="New", pins=[pin])
         self.coordinator.async_post_http.assert_not_awaited()
         await self.coordinator.async_manage_light(name="New", pins=[19])
+        self.assertEqual(self.saved_config["hardware"]["configuration"]["board_profile"], board)
+        self.coordinator._get.side_effect = lambda path: copy.deepcopy(self.saved_config) if path == "/config" else self.fail("Saved profile must not require catalog lookup")
+        await self.coordinator._async_validate_hardware_pins(
+            self.saved_config["hardware"]["configuration"], self.saved_config["hardware"]
+        )
 
     async def test_creation_rejects_count_and_index_limits(self):
         self.management_config(*(["SINGLE"] * 16))
@@ -1093,7 +1098,8 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         pwm["phaseShift"]["mode"] = "OFF"
         await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         saved = self.saved_config["hardware"]
-        expected_configuration = {**original["configuration"], "board_id": "test-board", "board_revision": 2, "revision": 8}
+        expected_configuration = {**original["configuration"], "board_id": "test-board", "board_revision": 2,
+                                  "revision": 8, "board_profile": self.catalog["boards"][0]}
         self.assertEqual(saved["configuration"], expected_configuration)
         self.assertEqual(saved["pwm"], pwm)
         self.coordinator.async_request_refresh.assert_awaited_once()

@@ -65,7 +65,13 @@ revision from the controller's local catalog, or custom GPIOs without a board
 profile. It also configures PWM frequency, resolution (1–14 bits), timer number,
 speed mode (high speed only on ESP32), spread spectrum width/subsampling and
 phase shift. Existing lights, calibration, buttons and I2C settings are preserved;
-selecting a board does not install a template or remap GPIOs. Incompatible pin
+selecting a board saves the complete catalog profile in
+`hardware.configuration.board_profile`, but does not install a template or remap
+GPIOs. Light creation preserves and validates against that saved snapshot,
+without requiring a catalog lookup. Older configurations acquire the snapshot
+when the board is applied or a light is created. Firmware with controller-owned
+PWM requires a selected board profile before deploying lights; its runtime setup
+reads ConfigDB, not the catalog. Incompatible pin
 assignments are rejected. Changes require confirmation, stale-edit checks and
 persistent readback verification. PWM frequency/resolution combinations remain
 subject to hardware clock limits; firmware may reject output initialization even

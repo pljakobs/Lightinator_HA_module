@@ -212,13 +212,19 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Validate all assigned GPIOs against board functions and reservations."""
         board = None
         if configuration.get("board_id"):
-            catalog = await self.async_get_hardware_catalog()
-            board = next((board for board in catalog.get("boards", [])
-                          if board["id"] == configuration["board_id"]
-                          and board["revision"] == configuration.get("board_revision")
-                          and board["soc"] == configuration.get("soc")), None)
-            if board is None:
-                raise ValueError("Configured board is unavailable in the hardware catalog")
+            board = configuration.get("board_profile")
+            if not (isinstance(board, dict)
+                    and board.get("id") == configuration["board_id"]
+                    and board.get("revision") == configuration.get("board_revision")
+                    and board.get("soc") == configuration.get("soc")):
+                catalog = await self.async_get_hardware_catalog()
+                board = next((board for board in catalog.get("boards", [])
+                              if board["id"] == configuration["board_id"]
+                              and board["revision"] == configuration.get("board_revision")
+                              and board["soc"] == configuration.get("soc")), None)
+                if board is None:
+                    raise ValueError("Configured board is unavailable in the hardware catalog")
+                configuration["board_profile"] = copy.deepcopy(board)
         claimed = set(board.get("reserved_gpios", [])) if board else set()
         available = next((entry["pins"] for entry in hardware.get("available_pins", [])
                           if entry["soc"] == configuration.get("soc")), None)
@@ -313,6 +319,19 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if (board_id and board_revision < 1) or (not board_id and board_revision != 0):
                 raise ValueError("Invalid board revision")
             candidate.update(board_id=board_id, board_revision=board_revision)
+            if board_id:
+                catalog = await self.async_get_hardware_catalog()
+                board = next((entry for entry in catalog["boards"]
+                              if entry["id"] == board_id and entry["revision"] == board_revision
+                              and entry["soc"] == soc), None)
+                if board is None:
+                    raise ValueError("Selected board is unavailable in the hardware catalog")
+                candidate["board_profile"] = copy.deepcopy(board)
+            else:
+                candidate["board_profile"] = {
+                    "id": "", "revision": 1, "name": "", "soc": soc,
+                    "implemented_pins": [], "reserved_gpios": [],
+                }
             await self._async_validate_hardware_pins(candidate, hardware)
             timer = pwm.get("timer", {})
             spread = pwm.get("spreadSpectrum", {})
