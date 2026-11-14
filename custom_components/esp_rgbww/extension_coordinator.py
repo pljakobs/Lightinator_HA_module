@@ -102,7 +102,6 @@ class ExtensionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     extension["config"] = None
                     state[name] = extension
                     continue
-                self.supported[extension_id] = True
                 extension["config"] = self.configs.get(extension_id)
                 extension["error"] = str(err) or type(err).__name__
                 _LOGGER.warning(
@@ -111,7 +110,6 @@ class ExtensionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 state[name] = extension
                 continue
             except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-                self.supported[extension_id] = True
                 extension["config"] = self.configs.get(extension_id)
                 extension["error"] = str(err) or type(err).__name__
                 _LOGGER.warning(
@@ -120,9 +118,14 @@ class ExtensionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 state[name] = extension
                 continue
 
-            if not isinstance(config, dict):
-                self.supported[extension_id] = True
-                extension["config"] = self.configs.get(extension_id)
+            if (
+                not isinstance(config, dict)
+                or config.get("extension_id") != extension_id
+                or not isinstance(config.get("available"), bool)
+            ):
+                self.supported[extension_id] = False
+                self.configs.pop(extension_id, None)
+                extension["config"] = None
                 extension["error"] = "Invalid extension configuration response"
                 _LOGGER.warning(
                     "Unable to poll %s config: %s", extension_id, extension["error"]
@@ -165,6 +168,11 @@ class ExtensionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             or not update.keys() <= _WRITABLE_CONFIG[extension_id]
         ):
             raise ValueError("Unknown extension or read-only configuration fields")
+        if (
+            self.supported.get(extension_id) is not True
+            or self.configs.get(extension_id, {}).get("extension_id") != extension_id
+        ):
+            raise ValueError("Extension capability has not been reported by the controller")
         async with self._config_lock:
             await self._request(
                 "POST", f"/extensions/{extension_id}/config", dict(update)
@@ -172,7 +180,11 @@ class ExtensionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result = await self._request(
                 "GET", f"/extensions/{extension_id}/config"
             )
-            if not isinstance(result, dict):
+            if (
+                not isinstance(result, dict)
+                or result.get("extension_id") != extension_id
+                or not isinstance(result.get("available"), bool)
+            ):
                 raise ValueError(f"Invalid {extension_id} configuration response")
             for key, value in update.items():
                 if result.get(key) != value:
@@ -182,6 +194,13 @@ class ExtensionCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_start_spectrum_measurement(self) -> None:
         """Start one AS7341 measurement."""
+        config = self.configs.get("spectrum-1", {})
+        if (
+            self.supported.get("spectrum-1") is not True
+            or config.get("extension_id") != "spectrum-1"
+            or not config.get("available")
+        ):
+            raise ValueError("Spectral measurement capability is not available")
         await self._request(
             "POST", "/extensions/spectrum-1/start_measurement", {}
         )

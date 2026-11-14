@@ -827,10 +827,25 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         config = configuration(*types)
         hardware = config["hardware"]["configuration"]
         hardware.update({
-            "revision": 7, "soc": "esp32", "board_id": "", "template_id": "keep",
+            "revision": 7, "soc": "esp32", "board_id": "test-board",
+            "board_revision": 2, "template_id": "keep",
             "system": {"clear_config_enabled": True, "clear_config_pin": 21},
             "buttons": [{"pin": 22}], "buses": [{"sda": 23, "scl": 25}],
         })
+        hardware["board_profile"] = {
+            "id": "test-board", "revision": 2, "soc": "esp32", "name": "Test board",
+            "reserved_gpios": [],
+            "implemented_pins": [
+                {"gpio": pin, "allowed_functions": ["light.pwm"]}
+                for pin in range(40)
+            ] + [
+                {"gpio": pin, "allowed_functions": [function]}
+                for pin, function in (
+                    (21, "system.clear_config"), (22, "button.input"),
+                    (23, "i2c.sda"), (25, "i2c.scl"),
+                )
+            ],
+        }
         pin = 1
         for light in hardware["lights"]:
             light["pins"] = list(range(pin, pin + len(CHANNELS[light["type"]])))
@@ -921,6 +936,18 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         await self.coordinator._async_validate_hardware_pins(
             self.saved_config["hardware"]["configuration"], self.saved_config["hardware"]
         )
+
+    async def test_creation_requires_a_board_profile_for_pwm_lights(self):
+        self.management_config("SINGLE")
+        configuration = self.saved_config["hardware"]["configuration"]
+        configuration.update(board_id="", board_revision=0)
+        configuration["board_profile"] = {
+            "id": "", "revision": 1, "name": "", "soc": "esp32",
+            "implemented_pins": [], "reserved_gpios": [],
+        }
+        with self.assertRaisesRegex(ValueError, "Select a board profile"):
+            await self.coordinator.async_manage_light(name="New", pins=[18])
+        self.coordinator.async_post_http.assert_not_awaited()
 
     async def test_creation_rejects_count_and_index_limits(self):
         self.management_config(*(["SINGLE"] * 16))
@@ -1106,9 +1133,10 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.async_post_http.assert_awaited_once()
         self.assertEqual(set(self.coordinator.async_post_http.call_args.args[1]["hardware"]), {"configuration", "pwm"})
         next_expected = copy.deepcopy(saved)
-        await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=next_expected)
-        self.assertEqual(saved["configuration"]["board_id"], "")
-        self.assertEqual(saved["configuration"]["board_revision"], 0)
+        with self.assertRaisesRegex(ValueError, "Select a board profile"):
+            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=next_expected)
+        self.assertEqual(saved["configuration"]["board_id"], "test-board")
+        self.assertEqual(saved["configuration"]["board_revision"], 2)
 
     async def test_hardware_rejects_wrong_board_revision_soc_and_input_conflicts(self):
         for board_id, revision in (("test-board", 1), ("other-soc", 2), ("unknown", 2), ("", 1)):
@@ -1134,34 +1162,34 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
             original, pwm = self.hardware_config()
             pwm[section][key] = value
             with self.subTest(section=section, key=key, value=value), self.assertRaises(ValueError):
-                await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+                await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
             self.coordinator.async_post_http.assert_not_awaited()
         original, pwm = self.hardware_config("esp32c3")
         pwm["timer"]["speed_mode"] = "HIGHSPEED"
         with self.assertRaisesRegex(ValueError, "mode"):
-            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         self.coordinator.async_post_http.assert_not_awaited()
         pwm["timer"]["speed_mode"] = "LOWSPEED"
-        await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
 
     async def test_hardware_stale_pwm_and_bad_readback_surface_errors(self):
         original, pwm = self.hardware_config()
         original["pwm"]["timer"]["number"] = 1
         with self.assertRaisesRegex(ValueError, "changed"):
-            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         self.coordinator.async_post_http.assert_not_awaited()
         original, pwm = self.hardware_config()
         changed = copy.deepcopy(self.saved_config)
         changed["hardware"]["pwm"]["timer"]["frequency"] = 2000
         self.coordinator._get.side_effect = [copy.deepcopy(self.saved_config), changed]
         with self.assertRaisesRegex(ValueError, "changed"):
-            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         self.coordinator.async_post_http.assert_not_awaited()
         original, pwm = self.hardware_config()
         self.coordinator.async_post_http.side_effect = None
         self.coordinator.async_post_http.return_value = {"success": True}
         with self.assertRaisesRegex(ValueError, "readback"):
-            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         self.coordinator.async_request_refresh.assert_not_awaited()
 
     async def test_custom_hardware_gpio_capabilities_and_soc_identity_are_checked(self):
@@ -1174,14 +1202,14 @@ class VirtualLightTests(unittest.IsolatedAsyncioTestCase):
         }]
         self.saved_config["hardware"]["available_pins"][0]["pins"][0]["capability"] = 1
         with self.assertRaisesRegex(ValueError, "support"):
-            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         self.coordinator.async_post_http.assert_not_awaited()
         self.saved_config["hardware"]["available_pins"][0]["pins"][0]["capability"] = 7
-        await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+        await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         original, pwm = self.hardware_config()
         self.coordinator.data["info"]["device"]["soc"] = "esp32c3"
         with self.assertRaisesRegex(ValueError, "SoC"):
-            await self.coordinator.async_update_hardware("", 0, pwm, expected_hardware=original)
+            await self.coordinator.async_update_hardware("test-board", 2, pwm, expected_hardware=original)
         self.coordinator.async_post_http.assert_not_awaited()
 
     async def test_hardware_configure_form_filters_boards_and_requires_confirmation(self):

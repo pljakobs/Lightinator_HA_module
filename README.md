@@ -62,8 +62,9 @@ On 5.1, **Create light** in Configure lets you choose a name, output type and
 unused PWM GPIOs. **Delete light** requires confirmation; when removing the
 default with other lights remaining, choose its replacement. The final light
 can be deleted. **Board and PWM settings** selects a SoC-compatible board and
-revision from the controller's local catalog, or custom GPIOs without a board
-profile. It also configures PWM frequency, resolution (1–14 bits), timer number,
+revision from the controller's local catalog. PWM lights require a selected
+board profile; custom GPIO assignment without a profile is not supported. It
+also configures PWM frequency, resolution (1–14 bits), timer number,
 speed mode (high speed only on ESP32), spread spectrum width/subsampling and
 phase shift. Existing lights, calibration, buttons and I2C settings are preserved;
 selecting a board saves the complete catalog profile in
