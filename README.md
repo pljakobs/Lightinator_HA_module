@@ -130,6 +130,66 @@ The `esp_rgbww.scan_wifi` and `esp_rgbww.connect_wifi` services start a scan and
 connect a controller to an SSID. The `esp_rgbww.save_preset` service stores the
 current HSV or raw channel state as a named controller preset.
 
+### Sensor readings on a dashboard
+
+Readings are native Home Assistant `sensor` entities associated with the
+controller, not attributes on its light entity. INA219 current, voltage and
+power use the corresponding Home Assistant device classes and units (A, V and
+W). Each AS7341 spectral channel F1-F8, clear channel and near-infrared channel
+has its own entity in raw ADC `count`, not lux. Reading age, errors, spectral
+measurement state and sample integration/gain values are separate diagnostic
+sensors.
+
+Electrical and spectral measurements have `state_class: measurement`, so Home
+Assistant can record their history and long-term statistics when included in
+Recorder. Disabled or invalid readings are unavailable; missing or non-finite
+values are not replaced with zero.
+
+Use the built-in dashboard cards:
+
+- **Tile** or **Entities** for current readings and measurement controls.
+- **Gauge** for current or power against a meaningful minimum/maximum range.
+- **History Graph** for measurements or multiple spectral channels over time.
+- **Statistics Graph** for longer-term measurement trends.
+
+No custom card is needed for these displays. Add a card through the dashboard
+editor, or use the YAML examples below. Replace the illustrative entity IDs
+with the actual IDs from **Settings > Devices & services > Entities**.
+
+```yaml
+type: entities
+title: Lightinator measurements
+entities:
+  - sensor.lightinator_current
+  - sensor.lightinator_voltage
+  - sensor.lightinator_power
+  - button.lightinator_start_spectral_measurement
+```
+
+Extension readings are polled every five seconds, but polling does not start
+new AS7341 measurements. Press **Start Spectral Measurement** to request a
+sample; the AS7341 interval setting alone does not enable periodic sampling.
+
+```yaml
+type: history-graph
+title: Spectral channels
+hours_to_show: 2
+entities:
+  - sensor.lightinator_spectral_channel_f1
+  - sensor.lightinator_spectral_channel_f2
+  - sensor.lightinator_spectral_channel_f3
+  - sensor.lightinator_spectral_channel_f4
+  - sensor.lightinator_spectral_channel_f5
+  - sensor.lightinator_spectral_channel_f6
+  - sensor.lightinator_spectral_channel_f7
+  - sensor.lightinator_spectral_channel_f8
+```
+
+This graph shows channel values **over time**, not a spectrum snapshot. A
+spectrum snapshot with wavelength/channel on the horizontal axis and intensity
+on the vertical axis requires a custom card; it is not a standard native Home
+Assistant card.
+
 ### Virtual lights (5.1)
 
 Each configured light is identified by controller chip ID plus its persistent
