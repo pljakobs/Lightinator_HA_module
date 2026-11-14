@@ -106,6 +106,8 @@ class LightinatorOptionsFlow(OptionsFlow):
                 else:
                     board_key = user_input["board"]
                     board = self._boards.get(board_key)
+                    if not board_key and self._hardware_edit["configuration"].get("lights"):
+                        raise ValueError("Select a board profile before configuring PWM lights")
                     if board_key and board is None:
                         raise ValueError("Selected board is no longer available")
                     pwm = {
@@ -131,8 +133,17 @@ class LightinatorOptionsFlow(OptionsFlow):
         pwm = self._hardware_edit["pwm"]
         timer = pwm.get("timer", {})
         spread = pwm.get("spreadSpectrum", {})
-        board_key = f'{configuration.get("board_id")}:{configuration.get("board_revision")}' if configuration.get("board_id") else ""
-        choices = [{"value": "", "label": "Custom GPIOs (no board profile)"}] + [
+        has_lights = bool(configuration.get("lights"))
+        board_key = (
+            f'{configuration.get("board_id")}:{configuration.get("board_revision")}'
+            if configuration.get("board_id")
+            else "__select_board__" if has_lights else ""
+        )
+        choices = ([] if has_lights else [
+            {"value": "", "label": "No board profile (no PWM lights)"}
+        ]) + ([
+            {"value": "__select_board__", "label": "Select a board profile"}
+        ] if board_key == "__select_board__" else []) + [
             {"value": key, "label": f'{board["name"]} (rev {board["revision"]})'}
             for key, board in self._boards.items()
         ]

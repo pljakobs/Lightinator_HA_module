@@ -229,6 +229,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if board is None:
                     raise ValueError("Configured board is unavailable in the hardware catalog")
                 configuration["board_profile"] = copy.deepcopy(board)
+        if configuration.get("lights") and board is None:
+            raise ValueError("Select a board profile before configuring PWM lights")
         claimed = set(board.get("reserved_gpios", [])) if board else set()
         available = next((entry["pins"] for entry in hardware.get("available_pins", [])
                           if entry["soc"] == configuration.get("soc")), None)
@@ -322,6 +324,8 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raise ValueError("Invalid board selection")
             if (board_id and board_revision < 1) or (not board_id and board_revision != 0):
                 raise ValueError("Invalid board revision")
+            if candidate.get("lights") and not board_id:
+                raise ValueError("Select a board profile before configuring PWM lights")
             candidate.update(board_id=board_id, board_revision=board_revision)
             if board_id:
                 catalog = await self.async_get_hardware_catalog()

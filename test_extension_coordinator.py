@@ -172,6 +172,19 @@ class ExtensionCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.coordinator.data["current"]["error"])
         self.assertEqual(self.coordinator.data["spectrum"]["reading"]["data"]["f1"], 123)
 
+    async def test_invalid_config_identity_does_not_report_extension_capability(self):
+        await self.coordinator.async_request_refresh()
+        self.overrides[("GET", "/extensions/current-1/config")] = (
+            200, {**self.configs["current-1"], "extension_id": "spectrum-1"}
+        )
+        await self.coordinator.async_request_refresh()
+        self.assertFalse(self.coordinator.supported["current-1"])
+        self.assertNotIn("current-1", self.coordinator.configs)
+        with self.assertRaisesRegex(ValueError, "capability has not been reported"):
+            await self.coordinator.async_update_extension_config(
+                "current-1", {"enabled": False}
+            )
+
     async def test_readings_404_clears_old_sample_but_retains_configuration(self):
         await self.coordinator.async_request_refresh()
         self.overrides[("GET", "/extensions/current-1/readings")] = (404, {"error": "disconnected"})
