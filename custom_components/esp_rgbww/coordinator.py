@@ -10,7 +10,7 @@ import time
 import xml.etree.ElementTree as ET
 from uuid import uuid4
 from datetime import timedelta
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -23,6 +23,9 @@ from .const import CONF_CHIP_ID, CONF_DEVICE_NAME, DOMAIN, UPDATE_INTERVAL
 from .rpc import RpcAuthenticationError, RpcError, authentication_hash
 from .virtual_lights import CHANNELS, CONF_LEGACY_LIGHT_ID, VirtualLight, decode_color, discover_lights
 from .presets import preset_command, with_light_favorite
+
+if TYPE_CHECKING:
+    from .extension_coordinator import ExtensionCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +81,7 @@ class LightinatorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._light_refresh_unsubs: dict[str, Callable[[], None]] = {}
         self._config: dict[str, Any] | None = None
         self._config_lock = asyncio.Lock()
+        self.extensions: ExtensionCoordinator | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers

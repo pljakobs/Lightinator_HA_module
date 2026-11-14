@@ -16,6 +16,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, PLATFORMS
 from .coordinator import LightinatorCoordinator
+from .extension_coordinator import ExtensionCoordinator
 from .virtual_lights import CHANNELS
 
 _LOGGER = logging.getLogger(__name__)
@@ -217,6 +218,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"Cannot connect to Lightinator: {err}") from err
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    extensions = ExtensionCoordinator(hass, entry, session)
+    await extensions.async_config_entry_first_refresh()
+    coordinator.extensions = extensions
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

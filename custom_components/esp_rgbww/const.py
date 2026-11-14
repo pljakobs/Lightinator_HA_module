@@ -28,7 +28,7 @@ RAW_CHANNELS_BY_MODEL = {
 }
 
 # Platforms provided by this integration
-PLATFORMS = ["light", "button", "sensor", "select", "update"]
+PLATFORMS = ["light", "button", "sensor", "select", "number", "switch", "update"]
 
 # Config entry keys (beyond the HA standard CONF_HOST / CONF_PORT / CONF_PASSWORD)
 CONF_CHIP_ID = "chip_id"

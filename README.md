@@ -23,6 +23,7 @@ A native Home Assistant integration for the [ESP RGBWW Firmware](https://github.
 - **Wi-Fi services** — scan networks or connect a controller to an SSID
 - **Animation controls** — Stop, Skip, Pause, Resume buttons
 - **Diagnostic sensors** — uptime, free heap, WiFi IP
+- **INA219 and AS7341 sensor extensions** — native current/voltage/power and spectral reading entities, persistent controls, and an on-demand spectral measurement button
 
 Uptime is a duration measurement, not an accumulated total; controller restarts
 can reset it. Runtime notifications received during an info refresh take
@@ -79,6 +80,20 @@ when configuration readback succeeds. Older 5.1 builds may require a restart.
 Editing existing lights/calibration and input/bus assignments remains in the
 controller's webapp. The legacy controller-wide **Color** form is only offered
 on 5.0.
+When the matching firmware extensions are present, Home Assistant also exposes
+native configuration entities for the INA219 current sensor and AS7341 spectral
+sensor. The AS7341 interval setting is stored as configuration only; it does not
+start periodic measurements. Use **Start Spectral Measurement** for an explicit
+sample. Sensor history and graphs are provided by Home Assistant's built-in
+history/statistics features; this integration does not require a custom card.
+The AS7341 channels, clear brightness, and near-infrared values are raw ADC
+counts, not lux. Unsupported extensions are omitted without affecting existing
+controllers.
+Configuration controls send only changed writable fields and verify persistent
+readback; response metadata such as `available` is never written. Invalid or
+non-finite readings are not graphed as zero. Extension error diagnostics remain
+available while disabled or when configuration polling fails, and polling errors
+are also logged in Home Assistant.
 The firmware update entity derives the Lightinator Version API URL from the
 controller's configured OTA catalog URL. Use its Firmware options to choose an
 available branch and debug or release build; available choices are filtered by
@@ -101,6 +116,13 @@ the controller's SoC.
 | `sensor.<name>_free_heap` | Sensor | Free heap memory (bytes) |
 | `sensor.<name>_wifi_connected` | Sensor | WiFi connection status |
 | `sensor.<name>_ip_address` | Sensor | Device IP address |
+| `sensor.<name>_current`, `_voltage`, `_power` | Sensor | Valid INA219 current (A), voltage (V), and power (W) readings |
+| `sensor.<name>_spectral_channel_f1` … `_f8` | Sensor | AS7341 spectral channels F1–F8 (raw ADC counts) |
+| `sensor.<name>_clear_brightness_low/high` | Sensor | AS7341 clear-channel brightness (raw ADC counts, not lux) |
+| `sensor.<name>_near_infrared_low/high` | Sensor | AS7341 near-infrared channels (raw ADC counts) |
+| `switch.<name>_current_sensor_enabled` / `_spectral_sensor_enabled` | Switch | Enable or disable the INA219 and AS7341 extensions |
+| `number.<name>_current_sensor_*` / `_spectral_sensor_*` | Number | Persistent address, shunt, sampling, and AS7341 integration/gain settings |
+| `button.<name>_start_spectral_measurement` | Button | Start one AS7341 measurement; unavailable while disabled or disconnected |
 | `update.<name>_firmware` | Update | Install a compatible controller ROM |
 
 The `esp_rgbww.scan_wifi` and `esp_rgbww.connect_wifi` services start a scan and
